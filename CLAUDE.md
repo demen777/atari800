@@ -181,6 +181,38 @@ Note that `statesav.c` calls `write8psram`/`read8psram` without including any he
 declaration. That predates the retarget and keeps working only because `-w` and
 `-Wno-error=implicit-function-declaration` are set.
 
+### SD card: this card needs real command CRCs
+
+[sdcard.c](drivers/sdcard/sdcard.c) is the FatFS sample SPI driver, which ships
+the dummy CRC `0x01` on every command and hardcodes the two CRCs the spec fixes
+(`0x95` for CMD0, `0x87` for CMD8). SPI mode usually ignores the command CRC — but
+the card tested here does not, and answered `R1=0x09` (idle + CRC error) to every
+command except those two. `send_cmd()` therefore computes a real CRC7 for every
+command now. Validate any change to `crc7_sd()` against those two known values
+before trusting it; `-DUSB_LOG=ON` prints a self-check of both at init.
+
+A healthy init reads:
+
+```
+sd: CMD0 -> 01 (idle, ok)
+sd: CMD8 -> 00            <- 0x00, not 0x01; the R7 echo is what identifies SDv2
+sd: CMD8 R7 = f0 00 01 aa <- leading byte is a card quirk; 01 aa is the part that matters
+sd: ACMD41[0] -> 00
+sd: CMD58 -> 00
+sd: OCR = c0 ff 80 00 -> SDHC/SDXC, block addressed
+sd: CardType=0c (initialised)
+```
+
+Two related traps already fixed, both of which presented as a total failure to
+init: CMD8's R1 is checked as `<= 1` because insisting on `0x01` left the four R7
+bytes unread and desynchronised everything after it, and the start-up clocks go
+out with CS deasserted as the spec requires.
+
+Card contents: FAT32 (exFAT also works — `FF_FS_EXFAT` is 1 — but FAT32 is the
+safer default for SDHC). The emulator reads `\atari800\atari800.cfg` and searches
+`\atari800` for ROMs, so seed that directory from [data/](data/). Built-in Altirra
+ROMs cover the no-card case.
+
 ### Storage: FatFS replaces stdio
 
 There is no C stdio file layer. Upstream `FILE *` usage was rewritten to FatFS `FIL`/`f_open`/`f_read`
