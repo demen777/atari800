@@ -14,6 +14,15 @@
 #include "ff.h"
 #include "diskio.h"
 
+#ifdef USB_LOG
+/* Declared by hand rather than via <stdio.h>: ff.h above defines its own
+   fopen/fread/fwrite with different signatures and the two collide. */
+int printf(const char *, ...);
+#define SDLOG(...) printf(__VA_ARGS__)
+#else
+#define SDLOG(...) ((void)0)
+#endif
+
 
 /*--------------------------------------------------------------------------
 
@@ -361,14 +370,26 @@ DSTATUS disk_initialize (
 	if (Stat & STA_NODISK) return Stat;	/* Is card existing in the soket? */
 
 	FCLK_SLOW();
+	SDLOG("sd: clk_peri=%u Hz spi_baud=%u Hz sck=GP%d mosi=GP%d miso=GP%d cs=GP%d\n",
+	      (unsigned)clock_get_hz(clk_peri),
+	      (unsigned)spi_get_baudrate(SDCARD_SPI_BUS),
+	      SDCARD_PIN_SPI0_SCK, SDCARD_PIN_SPI0_MOSI,
+	      SDCARD_PIN_SPI0_MISO, SDCARD_PIN_SPI0_CS);
 	CS_LOW();
 	for (n = 10; n; n--) xchg_spi(0xFF);	/* Send 80 dummy clocks */
 
 	ty = 0;
-	if (send_cmd(CMD0, 0) == 1) {			/* Put the card SPI/Idle state */
+	BYTE r_cmd0 = send_cmd(CMD0, 0);
+	SDLOG("sd: CMD0 -> %02x %s\n", r_cmd0,
+	      r_cmd0 == 1 ? "(idle, ok)" :
+	      r_cmd0 == 0xff ? "(no response: check wiring/clock)" : "(unexpected)");
+	if (r_cmd0 == 1) {			/* Put the card SPI/Idle state */
 		t = _millis();
-		if (send_cmd(CMD8, 0x1AA) == 1) {	/* SDv2? */
+		BYTE r_cmd8 = send_cmd(CMD8, 0x1AA);
+		SDLOG("sd: CMD8 -> %02x\n", r_cmd8);
+		if (r_cmd8 == 1) {	/* SDv2? */
 			for (n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);	/* Get 32 bit return value of R7 resp */
+			SDLOG("sd: CMD8 R7 = %02x %02x %02x %02x\n", ocr[0], ocr[1], ocr[2], ocr[3]);
 			if (ocr[2] == 0x01 && ocr[3] == 0xAA) {				/* Is the card supports vcc of 2.7-3.6V? */
 				while (_millis() < t + timeout && send_cmd(ACMD41, 1UL << 30)) ;	/* Wait for end of initialization with ACMD41(HCS) */
 				if (_millis() < t + timeout && send_cmd(CMD58, 0) == 0) {		/* Check CCS bit in the OCR */
@@ -387,6 +408,7 @@ DSTATUS disk_initialize (
 				ty = 0;
 		}
 	}
+	SDLOG("sd: CardType=%02x %s\n", ty, ty ? "(initialised)" : "(init FAILED)");
 	CardType = ty;	/* Card type */
 	deselect();
 
