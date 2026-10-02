@@ -375,7 +375,11 @@ DSTATUS disk_initialize (
 	      (unsigned)spi_get_baudrate(SDCARD_SPI_BUS),
 	      SDCARD_PIN_SPI0_SCK, SDCARD_PIN_SPI0_MOSI,
 	      SDCARD_PIN_SPI0_MISO, SDCARD_PIN_SPI0_CS);
-	CS_LOW();
+	/* The SD spec wants >=74 clocks with CS HIGH before the first command; driving
+	   them with CS asserted (as this driver did) lets a card mis-frame the
+	   bytes that follow - which showed up as a corrupt first R7 byte and
+	   CRC errors on later commands. send_cmd() asserts CS itself. */
+	CS_HIGH();
 	for (n = 10; n; n--) xchg_spi(0xFF);	/* Send 80 dummy clocks */
 
 	ty = 0;
@@ -398,7 +402,20 @@ DSTATUS disk_initialize (
 			for (n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);	/* Get 32 bit return value of R7 resp */
 			SDLOG("sd: CMD8 R7 = %02x %02x %02x %02x\n", ocr[0], ocr[1], ocr[2], ocr[3]);
 			if (ocr[2] == 0x01 && ocr[3] == 0xAA) {				/* Is the card supports vcc of 2.7-3.6V? */
-				while (_millis() < t + timeout && send_cmd(ACMD41, 1UL << 30)) ;	/* Wait for end of initialization with ACMD41(HCS) */
+				/* Report the first few replies: a card that is merely busy answers
+				   0x01 over and over, whereas 0x09 (idle + CRC error) or 0x05
+				   (illegal command) means the command itself is being rejected. */
+				{
+					unsigned tries = 0;
+					BYTE r41;
+					while (_millis() < t + timeout) {
+						r41 = send_cmd(ACMD41, 1UL << 30);
+						if (tries < 4) SDLOG("sd: ACMD41[%u] -> %02x\n", tries, r41);
+						tries++;
+						if (r41 == 0) break;
+					}
+					SDLOG("sd: ACMD41 gave up after %u tries\n", tries);
+				}
 				SDLOG("sd: ACMD41 %s\n", _millis() < t + timeout ? "completed" : "TIMED OUT");
 				BYTE r58 = send_cmd(CMD58, 0);
 				SDLOG("sd: CMD58 -> %02x\n", r58);
