@@ -387,13 +387,27 @@ DSTATUS disk_initialize (
 		t = _millis();
 		BYTE r_cmd8 = send_cmd(CMD8, 0x1AA);
 		SDLOG("sd: CMD8 -> %02x\n", r_cmd8);
-		if (r_cmd8 == 1) {	/* SDv2? */
+		/* The authoritative SDv2/SDHC test is the R7 echo of the 0x1AA pattern,
+		   not the exact R1 byte. This card answers 0x00 (no error, with the
+		   idle bit already clear) rather than 0x01, and insisting on 0x01 sent
+		   it down the legacy branch with four unread R7 bytes still in flight,
+		   which desynchronised every command after it. A card that genuinely
+		   lacks CMD8 answers 0x05 (illegal command), so accepting 0 or 1
+		   cannot misclassify one. */
+		if (r_cmd8 <= 1) {	/* SDv2? */
 			for (n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);	/* Get 32 bit return value of R7 resp */
 			SDLOG("sd: CMD8 R7 = %02x %02x %02x %02x\n", ocr[0], ocr[1], ocr[2], ocr[3]);
 			if (ocr[2] == 0x01 && ocr[3] == 0xAA) {				/* Is the card supports vcc of 2.7-3.6V? */
 				while (_millis() < t + timeout && send_cmd(ACMD41, 1UL << 30)) ;	/* Wait for end of initialization with ACMD41(HCS) */
-				if (_millis() < t + timeout && send_cmd(CMD58, 0) == 0) {		/* Check CCS bit in the OCR */
+				SDLOG("sd: ACMD41 %s\n", _millis() < t + timeout ? "completed" : "TIMED OUT");
+				BYTE r58 = send_cmd(CMD58, 0);
+				SDLOG("sd: CMD58 -> %02x\n", r58);
+				if (_millis() < t + timeout && r58 == 0) {	/* Check CCS bit in the OCR */
 					for (n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);
+					SDLOG("sd: OCR = %02x %02x %02x %02x -> %s\n",
+					      ocr[0], ocr[1], ocr[2], ocr[3],
+					      (ocr[0] & 0x40) ? "SDHC/SDXC, block addressed"
+					                      : "SDSC, byte addressed");
 					ty = (ocr[0] & 0x40) ? CT_SD2 | CT_BLOCK : CT_SD2;	/* Card id SDv2 */
 				}
 			}
