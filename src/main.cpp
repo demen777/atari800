@@ -3,7 +3,7 @@
 #include <hardware/watchdog.h>
 #include <hardware/clocks.h>
 #include <hardware/flash.h>
-#include <hardware/structs/vreg_and_chip_reset.h>
+#include <hardware/vreg.h>
 #include <pico/bootrom.h>
 #include <pico/time.h>
 #include <pico/multicore.h>
@@ -32,6 +32,26 @@ extern "C" {
 
 static FATFS fs;
 semaphore vga_start_semaphore;
+
+/* Stack high-water measurement. Core 0's stack is the top of SCRATCH_Y and the
+   emulation loop overran the default 2 KB, so the real figure matters. */
+extern "C" char __StackBottom, __StackTop;
+#define STACK_PAINT 0xA5A5A5A5u
+
+static void paint_stack() {
+    uint32_t sp;
+    __asm volatile ("mov %0, sp" : "=r" (sp));
+    uint32_t *p = (uint32_t *) &__StackBottom;
+    uint32_t *end = (uint32_t *) (sp - 256); /* leave our own frame alone */
+    while (p < end) *p++ = STACK_PAINT;
+}
+
+static unsigned stack_used() {
+    const uint32_t *p = (const uint32_t *) &__StackBottom;
+    const uint32_t *top = (const uint32_t *) &__StackTop;
+    while (p < top && *p == STACK_PAINT) p++;
+    return (unsigned) ((const char *) top - (const char *) p);
+}
 #define DISP_WIDTH (320)
 #define DISP_HEIGHT (240)
 extern "C" UBYTE __aligned(4) __screen[Screen_HEIGHT * Screen_WIDTH];
@@ -674,6 +694,7 @@ void __time_critical_func(render_core)() {
     graphics_set_bgcolor(0x000000);
     graphics_set_offset(0, 0);
     graphics_set_flashmode(false, false);
+    printf("graphics_init done on core1\n");
     sem_acquire_blocking(&vga_start_semaphore);
     // 60 FPS loop
 #define frame_tick (16666)
@@ -762,13 +783,28 @@ inline static void init_wii() {
 }
 
 int main() {
-    hw_set_bits(&vreg_and_chip_reset_hw->vreg, VREG_AND_CHIP_RESET_VREG_VSEL_BITS);
+#ifndef SYS_CLOCK_KHZ
+#define SYS_CLOCK_KHZ 252000
+#endif
+    /* Only over-volt when actually overclocking, so a conservative
+       SYS_CLOCK_KHZ is a true stock-conditions build. */
+#if SYS_CLOCK_KHZ > 150000
+    vreg_set_voltage(VREG_VOLTAGE_1_20);
     sleep_ms(10);
-    set_sys_clock_khz(378 * KHZ, true);
+#endif
+    set_sys_clock_khz(SYS_CLOCK_KHZ, true);
+    paint_stack();
     stdio_init_all();
+    printf("\n=== pico-atari boot ===\n");
+    printf("sys_clk=%u Hz  dvi clk=GP%d data=GP%d  pio_gpio_base=%d\n",
+           (unsigned)clock_get_hz(clk_sys),
+           beginHDMI_PIN_clk, beginHDMI_PIN_data, HDMI_PIO_GPIO_BASE);
     keyboard_init();
+    printf("keyboard_init done\n");
     keyboard_send(0xFF);
+    printf("keyboard_send done\n");
     nespad_begin(clock_get_hz(clk_sys) / 1000, NES_GPIO_CLK, NES_GPIO_DATA, NES_GPIO_LAT);
+    printf("nespad_begin done\n");
 
     nespad_read();
     sleep_ms(50);
@@ -780,22 +816,29 @@ int main() {
     }
 
     init_fs(); // TODO: psram replacement (pagefile)
+    printf("init_fs done, SD_CARD_AVAILABLE=%d\n", (int)SD_CARD_AVAILABLE);
     init_psram();
+    printf("init_psram done\n");
+
+    /* Start the display before the emulator: it depends only on the static
+       __screen buffer, and bringing it up first means a failure further down
+       shows as a black screen on a live link instead of no signal at all. */
+    sem_init(&vga_start_semaphore, 0, 1);
+    multicore_launch_core1(render_core);
+    sem_release(&vga_start_semaphore);
+    printf("core1/graphics started\n");
 
     /* force the 400/800 OS to get the Memo Pad */
     char *test_args[] = {
         "-atari",
         NULL,
     };
-    printf("libatari800_init");
+    printf("libatari800_init\n");
     libatari800_init(-1, test_args);
-    printf("libatari800_clear_input_array");
+    printf("libatari800_init returned\n");
     libatari800_clear_input_array(&input_map);
 
-    sem_init(&vga_start_semaphore, 0, 1);
-    multicore_launch_core1(render_core);
-    sem_release(&vga_start_semaphore);
-
+#ifdef PICO_DEFAULT_LED_PIN
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
     for (int i = 0; i < 6; i++) {
@@ -804,6 +847,7 @@ int main() {
         sleep_ms(33);
         gpio_put(PICO_DEFAULT_LED_PIN, false);
     }
+#endif
 
     PWM_init_pin(BEEPER_PIN, (1 << 8) - 1);
 #ifdef SOUND
@@ -837,6 +881,30 @@ int main() {
         snd_channels = libatari800_get_num_sound_channels();
 #endif
         libatari800_next_frame(&input_map);
+        {
+            static unsigned frames = 0;
+            if (++frames % 60u == 0) {
+#ifdef HDMI
+                printf("alive: %u frames, video irqs=%u\n",
+                       frames, (unsigned)hdmi_dbg_irq_count());
+                /* Full register dump every ~5 s: enough to diagnose, not
+                   enough to drown the log. Guarded because printf is a no-op
+                   without USB_LOG but hdmi_dbg_dump() prints via <stdio.h>
+                   directly, so leaving it unguarded would spam a release
+                   build every five seconds. */
+#ifdef USB_LOG
+                if (frames % 300u == 0) {
+                    printf("stack: %u of %u bytes used\n",
+                           stack_used(),
+                           (unsigned)(&__StackTop - &__StackBottom));
+                    hdmi_dbg_dump();
+                }
+#endif
+#else
+                printf("alive: %u frames\n", frames);
+#endif
+            }
+        }
         tight_loop_contents();
     }
 

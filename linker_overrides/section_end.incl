@@ -1,0 +1,29 @@
+/* Override of pico_standard_link/script_include/section_end.incl.
+ * Only the stack symbols differ: core 0's stack is the top CORE0_STACK_SIZE
+ * bytes of main RAM rather than SCRATCH_Y (see sections_stack.incl).
+ */
+SECTIONS
+{
+    __StackOneTop = ORIGIN(SCRATCH_X) + LENGTH(SCRATCH_X);
+    __StackOneBottom = __StackOneTop - SIZEOF(.stack1_dummy);
+
+    __StackTop = ORIGIN(RAM) + LENGTH(RAM);
+    __StackBottom = __StackTop - CORE0_STACK_SIZE;
+    /* "stack limit" is historically the maximum heap pointer */
+    __StackLimit = __StackBottom;
+    PROVIDE(__stack = __StackTop);
+
+    /* picolibc and LLVM */
+    PROVIDE (__heap_start = __end__);
+    PROVIDE (__heap_end = __HeapLimit);
+    PROVIDE( __tls_align = MAX(ALIGNOF(.tdata), ALIGNOF(.tbss)) );
+    PROVIDE( __tls_size_align = (__tls_size + __tls_align - 1) & ~(__tls_align - 1));
+    PROVIDE( __arm32_tls_tcb_offset = MAX(8, __tls_align) );
+
+    /* llvm-libc */
+    PROVIDE (_end = __end__);
+    PROVIDE (__llvm_libc_heap_limit = __HeapLimit);
+
+    /* Check if data + heap + stack exceeds RAM limit */
+    ASSERT(__StackLimit >= __HeapLimit, "region RAM overflowed")
+}

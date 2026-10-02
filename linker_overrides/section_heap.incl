@@ -1,0 +1,19 @@
+/* Override of pico_standard_link/script_include/section_heap.incl.
+ * Identical to the SDK's except that the heap now stops below core 0's stack,
+ * which this port moved to the top of main RAM (see sections_stack.incl).
+ */
+SECTIONS
+{
+    .dummy_pre_heap (NOLOAD):
+    {
+        . = .;
+    } > RAM
+    .heap DEFINED(HEAP_LOC) ? HEAP_LOC : . (NOLOAD):
+    {
+        __end__ = .;
+        end = __end__;
+        KEEP(*(.heap*))
+    } > RAM
+    __HeapLimit = DEFINED(HEAP_LIMIT) ? HEAP_LIMIT :
+                  ORIGIN(RAM) + LENGTH(RAM) - CORE0_STACK_SIZE;
+}

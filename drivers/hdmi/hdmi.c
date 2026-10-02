@@ -27,7 +27,7 @@ static uint32_t palette[256];
 #define SCREEN_WIDTH (320)
 #define SCREEN_HEIGHT (240)
 //графический буфер
-static uint8_t* __scratch_y("hdmi_ptr_1") graphics_buffer = NULL;
+static uint8_t* __not_in_flash("hdmi_data") graphics_buffer = NULL;
 static int graphics_buffer_width = 0;
 static int graphics_buffer_height = 0;
 static int graphics_buffer_shift_x = 0;
@@ -47,8 +47,8 @@ static int dma_chan_pal_conv;
 
 //DMA буферы
 //основные строчные данные
-static uint32_t* __scratch_y("hdmi_ptr_3") dma_lines[2] = { NULL,NULL };
-static uint32_t* __scratch_y("hdmi_ptr_4") DMA_BUF_ADDR[2];
+static uint32_t* __not_in_flash("hdmi_data") dma_lines[2] = { NULL,NULL };
+static uint32_t* __not_in_flash("hdmi_data") DMA_BUF_ADDR[2];
 
 //ДМА палитра для конвертации
 //в хвосте этой памяти выделяется dma_data
@@ -151,6 +151,35 @@ static uint tmds_encoder(const uint8_t d8) {
     return d_out;
 }
 
+uint32_t hdmi_dbg_irq_count(void) { return irq_inx; }
+
+/* A frozen irq count means the chain stopped rather than never started, and a
+   DMA channel that hit a bus error halts exactly like that. Dump the error and
+   busy bits for all four channels plus the PIO's stall flags. */
+void hdmi_dbg_dump(void) {
+    const int ch[4] = { dma_chan_ctrl, dma_chan, dma_chan_pal_conv_ctrl, dma_chan_pal_conv };
+    const char *nm[4] = { "ctrl", "data", "palctl", "palcnv" };
+    printf("hdmi dbg: irq=%u ints0=%08x pio.ctrl=%08x pio.fdebug=%08x pio.flevel=%08x\n",
+           (unsigned)irq_inx, (unsigned)dma_hw->ints0,
+           (unsigned)PIO_VIDEO->ctrl, (unsigned)PIO_VIDEO->fdebug,
+           (unsigned)PIO_VIDEO->flevel);
+    for (int i = 0; i < 4; i++) {
+        const int c = ch[i];
+        if (c < 0) continue;
+        const uint32_t ctrl = dma_hw->ch[c].ctrl_trig;
+        printf("  ch%-2d %-6s ctrl=%08x busy=%u ahb_err=%u rd_err=%u wr_err=%u"
+               " cnt=%u rd=%08x wr=%08x\n",
+               c, nm[i], (unsigned)ctrl,
+               (unsigned)((ctrl >> 24) & 1u),   /* BUSY */
+               (unsigned)((ctrl >> 31) & 1u),   /* AHB_ERROR */
+               (unsigned)((ctrl >> 30) & 1u),   /* READ_ERROR */
+               (unsigned)((ctrl >> 29) & 1u),   /* WRITE_ERROR */
+               (unsigned)dma_hw->ch[c].transfer_count,
+               (unsigned)dma_hw->ch[c].read_addr,
+               (unsigned)dma_hw->ch[c].write_addr);
+    }
+}
+
 static void pio_set_x(PIO pio, const int sm, uint32_t v) {
     uint instr_shift = pio_encode_in(pio_x, 4);
     uint instr_mov = pio_encode_mov(pio_x, pio_isr);
@@ -163,7 +192,7 @@ static void pio_set_x(PIO pio, const int sm, uint32_t v) {
 }
 
 
-static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
+static void __not_in_flash_func(dma_handler_HDMI)() {
     static uint32_t inx_buf_dma;
     static uint line = 0;
     irq_inx++;
@@ -348,6 +377,11 @@ static inline bool hdmi_init() {
     pio_remove_program(PIO_VIDEO, &program_PIO_HDMI, offs_prg0);
 
 
+    /* Must happen before the state machines are configured: it selects which
+     * 32-GPIO window this PIO can see. */
+    pio_set_gpio_base(PIO_VIDEO, HDMI_PIO_GPIO_BASE);
+    if (PIO_VIDEO_ADDR != PIO_VIDEO) pio_set_gpio_base(PIO_VIDEO_ADDR, HDMI_PIO_GPIO_BASE);
+
     offs_prg1 = pio_add_program(PIO_VIDEO_ADDR, &pio_program_conv_addr_HDMI);
     offs_prg0 = pio_add_program(PIO_VIDEO, &program_PIO_HDMI);
     pio_set_x(PIO_VIDEO_ADDR, SM_conv, ((uint32_t)conv_color >> 12));
@@ -385,7 +419,7 @@ static inline bool hdmi_init() {
     sm_config_set_wrap(&c_c, offs_prg1, offs_prg1 + (pio_program_conv_addr_HDMI.length - 1));
     sm_config_set_in_shift(&c_c, true, false, 32);
 
-    pio_sm_init(PIO_VIDEO_ADDR, SM_conv, offs_prg1, &c_c);
+    int rc_conv = pio_sm_init(PIO_VIDEO_ADDR, SM_conv, offs_prg1, &c_c);
     pio_sm_set_enabled(PIO_VIDEO_ADDR, SM_conv, true);
 
     //настройка PIO SM для вывода данных
@@ -401,8 +435,10 @@ static inline bool hdmi_init() {
         gpio_set_slew_rate(beginHDMI_PIN_clk + i, GPIO_SLEW_RATE_FAST);
     }
 
-    pio_sm_set_pins_with_mask(PIO_VIDEO, SM_video, 3u << beginHDMI_PIN_clk, 3u << beginHDMI_PIN_clk);
-    pio_sm_set_pindirs_with_mask(PIO_VIDEO, SM_video, 3u << beginHDMI_PIN_clk, 3u << beginHDMI_PIN_clk);
+    /* 64-bit variants take absolute GPIO numbers; the 32-bit ones are relative
+     * to the PIO's GPIO base and would overflow for a clock pair at GPIO38. */
+    pio_sm_set_pins_with_mask64(PIO_VIDEO, SM_video, 3ull << beginHDMI_PIN_clk, 3ull << beginHDMI_PIN_clk);
+    pio_sm_set_pindirs_with_mask64(PIO_VIDEO, SM_video, 3ull << beginHDMI_PIN_clk, 3ull << beginHDMI_PIN_clk);
     //пины
 
     for (int i = 0; i < 6; i++) {
@@ -420,8 +456,18 @@ static inline bool hdmi_init() {
     sm_config_set_fifo_join(&c_c, PIO_FIFO_JOIN_TX);
 
     sm_config_set_clkdiv(&c_c, clock_get_hz(clk_sys) / 252000000.0f);
-    pio_sm_init(PIO_VIDEO, SM_video, offs_prg0, &c_c);
+    int rc_video = pio_sm_init(PIO_VIDEO, SM_video, offs_prg0, &c_c);
     pio_sm_set_enabled(PIO_VIDEO, SM_video, true);
+    /* Decisive bring-up facts: a negative rc means the pin config was rejected,
+       and pinctrl shows which pins the SM was actually given. */
+    printf("hdmi: rc_conv=%d rc_video=%d gpio_base=%u sm_video.pinctrl=%08x clkdiv=%08x\n",
+           rc_conv, rc_video,
+           (unsigned)pio_get_gpio_base(PIO_VIDEO),
+           (unsigned)PIO_VIDEO->sm[SM_video].pinctrl,
+           (unsigned)PIO_VIDEO->sm[SM_video].clkdiv);
+    printf("hdmi: clk=GP%d data=GP%d conv_color=%p (x=%08x)\n",
+           beginHDMI_PIN_clk, beginHDMI_PIN_data,
+           (void *)conv_color, (unsigned)((uint32_t)conv_color >> 12));
 
     //настройки DMA
     dma_lines[0] = &conv_color[1024];

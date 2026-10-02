@@ -18,7 +18,17 @@
 #define DIR_SEP_BACKSLASH 1
 
 #include "debug.h"
-#include <boards/pico.h>
+#include <pico.h>
 #include <hardware/gpio.h>
+
+/* Disk/state activity blink. The RP2040 Murmulator build got a plain LED on
+ * GPIO25 from boards/pico.h; the RP2350-PiZero board header defines no
+ * PICO_DEFAULT_LED_PIN (its only LED is addressable), so this is a no-op
+ * there rather than driving an arbitrary pin. */
+#ifdef PICO_DEFAULT_LED_PIN
+#define LED_ACTIVITY(on) gpio_put(PICO_DEFAULT_LED_PIN, (on))
+#else
+#define LED_ACTIVITY(on) ((void)0)
+#endif
 
 #endif

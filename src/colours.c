@@ -358,6 +358,6 @@ int Colours_Initialise(int *argc, char *argv[])
 	/* Assume that Atari800_tv_mode has been already initialised. */
 	UpdateModeDependentPointers(Atari800_tv_mode);
 	UpdatePalette();
-	printf("UpdatePalette DONE")
+	printf("UpdatePalette DONE");
 	return TRUE;
 }

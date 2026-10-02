@@ -1,0 +1,26 @@
+/* Override of pico_standard_link/script_include/sections_stack.incl.
+ *
+ * The SDK default puts core 0's stack at the top of SCRATCH_Y, which is only
+ * 4 KB. This emulator's call depth exceeds that, and when the stack lived
+ * there an overflow silently overwrote whatever shared the bank: first the
+ * HDMI driver's DMA_BUF_ADDR (the video DMA then halted on a bus error with a
+ * garbage read address), then core 1's stack. Core 0's stack therefore sits at
+ * the very top of main RAM instead, where there is room to spare.
+ *
+ * CORE0_STACK_SIZE must match section_heap.incl and section_end.incl.
+ */
+CORE0_STACK_SIZE = 0x8000; /* 32 KB */
+
+SECTIONS
+{
+    /* Core 1 keeps SCRATCH_X; render_core is shallow. */
+    .stack1_dummy (NOLOAD):
+    {
+        *(.stack1*)
+    } > SCRATCH_X
+
+    .stack_dummy ORIGIN(RAM) + LENGTH(RAM) - CORE0_STACK_SIZE (NOLOAD):
+    {
+        KEEP(*(.stack*))
+    }
+}

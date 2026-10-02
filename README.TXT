@@ -1,10 +1,40 @@
-Atari emulator for ZX Murmulator dev. board (based on RP2040 Arm Cortex M0+ microcontroller)
-Related hardware description: https://murmulator.ru/howto 
-+ https://github.com/AlexEkb4ever/MURMULATOR_classical_scheme
-Telegram canal to discuss it: https://t.me/ZX_MURMULATOR
-Telegrem canal with useful things: https://t.me/ZX_MURMULATOR_DATA
-Data storage with useful things: https://file.murmulator.ru/data/
-N.B. current port uses PSRAM connected like this: https://github.com/DnCraptor/PICO-BK/raw/master/psram.jpg
+Atari emulator for the Waveshare RP2350-PiZero board
+(RP2350B, Arm Cortex-M33, 520K SRAM, 16M flash, on-board DVI and microSD).
+
+Board wiki: https://www.waveshare.com/wiki/RP2350-PiZero
+
+Video goes out of the board's own DVI connector. Note that HSTX is hard-wired to
+GPIO12-19 on RP2350 while the connector sits on GPIO32-39, so the output is
+generated as TMDS from PIO, not from HSTX. The system clock is 252 MHz because
+that yields an exact 25.2 MHz pixel clock for 640x480p60; changing it changes
+the video timing.
+
+The PSRAM pad is unpopulated on a stock board, so the banked memory the emulator
+used to keep in external PSRAM now lives in a 40K SRAM array
+(drivers/psram-sram). No PSRAM chip is required.
+
+Build (the toolchain comes from the VS Code Raspberry Pi Pico extension;
+SDK 2.3.1 or newer is required, as that is the first with a board header for
+this board):
+
+    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel
+    cmake --build build
+
+The result is bin/MinSizeRel/pico-atari-16384K-DVI.uf2.
+
+INPUT IS NOT FINISHED. The PS/2 keyboard and NES gamepad pins in CMakeLists.txt
+are placeholders on free 40-pin header GPIOs, picked only to avoid the pins the
+PCB already uses (DVI 32-39, microSD 30/31/40/43, card-detect 22, PIO-USB
+28/29). They have not been verified against real wiring, so the key map below is
+inherited from the earlier ZX Murmulator port and should be treated as such.
+
+This port previously targeted the ZX Murmulator board (RP2040); that history is
+in git. Murmulator links, kept for reference:
+  https://murmulator.ru/howto
+  https://github.com/AlexEkb4ever/MURMULATOR_classical_scheme
+  https://t.me/ZX_MURMULATOR
+  https://t.me/ZX_MURMULATOR_DATA
+  https://file.murmulator.ru/data/
 
 This port is based on Atari800 emulator version 5.2.0: https://github.com/atari800/atari800
 -------------------------------
@@ -14,7 +44,7 @@ originally written by David Firth and now developed by the Atari800
 Development Team (please see DOC/CREDITS). This program is copyrighted and
 released under the GPL (see COPYING).
 
-Optimised for ZX Murmulator by me ;)
+Optimised for ZX Murmulator by me ;) then retargeted to RP2350-PiZero.
 PS2 Keyboard mapping:
 F1 - UI
 F2 - Option
