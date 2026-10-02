@@ -301,6 +301,29 @@ int rcvr_datablock (	/* 1:OK, 0:Error */
 /* Send a command packet to the MMC                                      */
 /*-----------------------------------------------------------------------*/
 
+/* SD command CRC7, polynomial x^7 + x^3 + 1.
+ *
+ * This card rejects every command carrying the dummy 0x01 CRC with R1=0x09
+ * (idle + CRC error); the only two that used to work, CMD0 and CMD8, are
+ * exactly the two for which the spec's correct CRCs were hardcoded. So
+ * compute the real thing for every command. Checked against those two known
+ * values: CMD0(0) must give 0x95 and CMD8(0x1AA) must give 0x87.
+ */
+static BYTE crc7_sd(const BYTE *buf, int len)
+{
+	BYTE crc = 0;
+	int i, j;
+	for (i = 0; i < len; i++) {
+		BYTE d = buf[i];
+		for (j = 0; j < 8; j++) {
+			crc <<= 1;
+			if ((d ^ crc) & 0x80) crc ^= 0x09;
+			d <<= 1;
+		}
+	}
+	return (BYTE)(((crc & 0x7F) << 1) | 1);
+}
+
 static
 BYTE send_cmd (		/* Return value: R1 resp (bit7==1:Failed to send) */
 	BYTE cmd,		/* Command index */
@@ -323,15 +346,16 @@ BYTE send_cmd (		/* Return value: R1 resp (bit7==1:Failed to send) */
 	}
 
 	/* Send command packet */
-	xchg_spi(0x40 | cmd);				/* Start + command index */
-	xchg_spi((BYTE)(arg >> 24));		/* Argument[31..24] */
-	xchg_spi((BYTE)(arg >> 16));		/* Argument[23..16] */
-	xchg_spi((BYTE)(arg >> 8));			/* Argument[15..8] */
-	xchg_spi((BYTE)arg);				/* Argument[7..0] */
-	n = 0x01;							/* Dummy CRC + Stop */
-	if (cmd == CMD0) n = 0x95;			/* Valid CRC for CMD0(0) */
-	if (cmd == CMD8) n = 0x87;			/* Valid CRC for CMD8(0x1AA) */
-	xchg_spi(n);
+	{
+		BYTE pkt[5];
+		pkt[0] = (BYTE)(0x40 | cmd);	/* Start + command index */
+		pkt[1] = (BYTE)(arg >> 24);	/* Argument[31..24] */
+		pkt[2] = (BYTE)(arg >> 16);	/* Argument[23..16] */
+		pkt[3] = (BYTE)(arg >> 8);	/* Argument[15..8] */
+		pkt[4] = (BYTE)arg;		/* Argument[7..0] */
+		for (n = 0; n < 5; n++) xchg_spi(pkt[n]);
+		xchg_spi(crc7_sd(pkt, 5));	/* real CRC7 + stop bit */
+	}
 
 	/* Receive command resp */
 	if (cmd == CMD12) xchg_spi(0xFF);	/* Diacard following one byte when CMD12 */
@@ -375,6 +399,12 @@ DSTATUS disk_initialize (
 	      (unsigned)spi_get_baudrate(SDCARD_SPI_BUS),
 	      SDCARD_PIN_SPI0_SCK, SDCARD_PIN_SPI0_MOSI,
 	      SDCARD_PIN_SPI0_MISO, SDCARD_PIN_SPI0_CS);
+	{
+		static const BYTE c0[5] = { 0x40, 0, 0, 0, 0 };
+		static const BYTE c8[5] = { 0x48, 0x00, 0x00, 0x01, 0xAA };
+		SDLOG("sd: crc7 self-check CMD0=%02x (want 95) CMD8=%02x (want 87)\n",
+			      crc7_sd(c0, 5), crc7_sd(c8, 5));
+	}
 	/* The SD spec wants >=74 clocks with CS HIGH before the first command; driving
 	   them with CS asserted (as this driver did) lets a card mis-frame the
 	   bytes that follow - which showed up as a corrupt first R7 byte and
