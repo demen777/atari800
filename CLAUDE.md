@@ -137,6 +137,16 @@ stack at boot and prints a high-water figure, so the real requirement is measura
 
 ### Zero-copy video
 
+**The 384-wide buffer is wider than the 320-pixel output window, so the offset matters.**
+[screen.h](src/screen.h) says only the middle 336 columns (`Screen_visible_x1` = 24 to
+`Screen_visible_x2` = 360) may ever be displayed; the rest is scratch that antic.c overruns into.
+With `graphics_set_offset(0, 0)` the window showed columns 0–319: 24 columns of that scratch on the left
+and the rightmost 40 of the visible area — five characters — cut off, which on a TV with overscan looks
+like two or three. [main.cpp](src/main.cpp) now derives the offset from those variables rather than
+hardcoding it; it works out to **-32**, which lands exactly on the Atari's 40-column text field and drops
+8 columns symmetrically from each side of the visible area. A negative offset makes the renderer start
+further into each row;  is computed before the shift, so there is no overrun.
+
 There is no blit. [src/screen.c](src/screen.c) defines `__screen[384*240]` as the one 8-bit framebuffer,
 `Screen_atari` points at it, and `main.cpp` hands that exact pointer to `graphics_set_buffer()`. Hence
 `PLATFORM_DisplayScreen()` in [src/libatari800/video.c](src/libatari800/video.c) is an empty function, and

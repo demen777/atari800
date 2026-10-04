@@ -695,9 +695,19 @@ void __time_critical_func(render_core)() {
     graphics_init();
     graphics_set_textbuffer(buffer);
     graphics_set_bgcolor(0x000000);
-    graphics_set_offset(0, 0);
+    /* Centre the Atari's visible area in the driver's DISP_WIDTH window.
+       screen.h: the buffer is 384 wide but only the middle 336 columns
+       (Screen_visible_x1..x2) may be displayed. With offset 0 the window
+       showed columns 0..319 - 24 columns of material that contract says must
+       never be shown, and the rightmost 40 of the visible area, five
+       characters, cut off. -32 lands exactly on the 40-column text field.
+       A negative offset makes the renderer start further into each row. */
+    graphics_set_offset(-(Screen_visible_x1
+                          + (Screen_visible_x2 - Screen_visible_x1 - DISP_WIDTH) / 2), 0);
     graphics_set_flashmode(false, false);
-    printf("graphics_init done on core1\n");
+    printf("graphics_init done on core1 (visible %d..%d of %d, window %d, offset %d)\n",
+           Screen_visible_x1, Screen_visible_x2, Screen_WIDTH, DISP_WIDTH,
+           -(Screen_visible_x1 + (Screen_visible_x2 - Screen_visible_x1 - DISP_WIDTH) / 2));
 #ifdef KBD_USB
     /* Deliberately on core 1. The emulator's UI (UI_Run via Atari800_Frame)
        spins inside GetKeyPress() polling PLATFORM_Keyboard(), so
