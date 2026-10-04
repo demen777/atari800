@@ -145,7 +145,7 @@ and the rightmost 40 of the visible area — five characters — cut off, which 
 like two or three. [main.cpp](src/main.cpp) now derives the offset from those variables rather than
 hardcoding it; it works out to **-32**, which lands exactly on the Atari's 40-column text field and drops
 8 columns symmetrically from each side of the visible area. A negative offset makes the renderer start
-further into each row;  is computed before the shift, so there is no overrun.
+further into each row; `input_buffer_end` is computed before the shift, so there is no overrun.
 
 There is no blit. [src/screen.c](src/screen.c) defines `__screen[384*240]` as the one 8-bit framebuffer,
 `Screen_atari` points at it, and `main.cpp` hands that exact pointer to `graphics_set_buffer()`. Hence
