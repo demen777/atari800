@@ -333,11 +333,18 @@ static int Select(int default_item, int nitems, const char *item[],
 				row = 0;
 			}
 		}
-		if (tip != NULL && tip[index] != NULL)
-			message = tip[index];
-		else if (itemwidth < 38 && (int) strlen(item[index]) > itemwidth)
-			/* the selected item was shortened */
-			message = item[index];
+		/* Guard the subscript. With an empty list - which the file selector
+		   produces whenever the directory is missing, and \atari800 is absent
+		   on a fresh card - this read item[0] of a zero-length (and already
+		   freed) array and ran strlen() on whatever pointer happened to be
+		   there, which hung the UI. index can also outlive a shorter listing. */
+		if (nitems > 0 && index >= 0 && index < nitems) {
+			if (tip != NULL && tip[index] != NULL)
+				message = tip[index];
+			else if (itemwidth < 38 && (int) strlen(item[index]) > itemwidth)
+				/* the selected item was shortened */
+				message = item[index];
+		}
 		if (message != NULL) {
 			CenterPrint(0x94, 0x9a, message, 22);
 		}
@@ -402,6 +409,9 @@ static int Select(int default_item, int nitems, const char *item[],
 			default:
 				if (drag || ascii <= 0x20 || ascii >= 0x7f)
 					continue;
+				/* Same subscript hazard as above: with an empty list this would
+				   read item[0][0] whenever the carried index was non-zero. */
+				if (nitems <= 0) break;
 				tmp_index = index; /* old index */
 				do {
 					if (++index >= nitems)
@@ -981,7 +991,10 @@ static int FileSelector(char *path, int select_dir, char pDirectories[][FILENAME
 				   Try the working directory as a last resort. */
 				Util_getcwd(current_dir, FILENAME_MAX);
 				GetDirectory(current_dir);
-				if (n_filenames >= 0)
+				/* Was >= 0, which is always true: n_filenames is never negative, so
+				   the "No files inside directory" message below was unreachable and
+				   an empty list was handed to Select() instead. */
+				if (n_filenames > 0)
 					break;
 
 				FilenamesFree();
