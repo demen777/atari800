@@ -90,8 +90,15 @@ the full 4 KB, i.e. still overflowing, just into core 1's stack in SCRATCH_X ins
 therefore relocated to the top 32 KB of main RAM** (`0x20078000`–`0x20080000`) by three small overrides in
 [linker_overrides/](linker_overrides/), wired up with `pico_add_linker_script_override_path`: 
 `sections_stack.incl` places it, `section_heap.incl` stops the heap below it, and `section_end.incl`
-recomputes the stack symbols. Keep `CORE0_STACK_SIZE` identical in all three — the SDK's own
-`ASSERT(__StackLimit >= __HeapLimit)` is what catches a mismatch. Core 1 keeps SCRATCH_X (4 KB,
+recomputes the stack symbols. `CORE0_STACK_SIZE` is defined once in `sections_stack.incl` and referenced by
+the other two, so it cannot drift; the SDK's own `ASSERT(__StackLimit >=
+__HeapLimit)` catches a bad value. It is **64 KB**, not the 32 KB first tried:
+the UI call chain is full of `FILENAME_MAX` (1024-byte) stack buffers —
+`current_dir`, `highlighted_file`, `temp`, `filename`, `fullfilename`, `szbuf`,
+plus whatever the caller in [ui.c](src/ui.c) holds — so opening the file
+selector adds roughly 8–10 KB on top of the ~11.5 KB the emulator loop uses.
+Overflowing runs straight into the heap, which is where `Util_malloc` is
+building the very filename list being scanned. Core 1 keeps SCRATCH_X (4 KB,
 `PICO_CORE1_STACK_SIZE`), SCRATCH_Y is now entirely unused, and the heap still has ~210 KB.
 
 The HDMI driver's data and handler also moved from `__scratch_y` to `__not_in_flash`/`__not_in_flash_func`,

@@ -911,7 +911,7 @@ int main() {
                    without USB_LOG but hdmi_dbg_dump() prints via <stdio.h>
                    directly, so leaving it unguarded would spam a release
                    build every five seconds. */
-#ifdef USB_LOG
+#if defined(USB_LOG) || defined(MNGR_DEBUG)   /* MNGR_DEBUG: a KBD_USB build cannot use USB_LOG, and the stack figure is exactly what is wanted there */
                 if (frames % 300u == 0) {
                     printf("stack: %u of %u bytes used\n",
                            stack_used(),
