@@ -181,7 +181,7 @@ Note that `statesav.c` calls `write8psram`/`read8psram` without including any he
 declaration. That predates the retarget and keeps working only because `-w` and
 `-Wno-error=implicit-function-declaration` are set.
 
-### SD card: this card needs real command CRCs
+### SD card: this card checks CRCs, both of them
 
 [sdcard.c](drivers/sdcard/sdcard.c) is the FatFS sample SPI driver, which ships
 the dummy CRC `0x01` on every command and hardcodes the two CRCs the spec fixes
@@ -207,6 +207,22 @@ Two related traps already fixed, both of which presented as a total failure to
 init: CMD8's R1 is checked as `<= 1` because insisting on `0x01` left the four R7
 bytes unread and desynchronised everything after it, and the start-up clocks go
 out with CS deasserted as the spec requires.
+
+**Data blocks need a real CRC16 too, and that one only breaks writes.** The same
+driver shipped a dummy `0xFFFF` after the 512 payload bytes, so the card refused
+every block at the data-response token. Reads were unaffected, because the
+driver discards the CRC the card sends back — which makes the failure oddly
+asymmetric: mounting works, directories list, `f_open` succeeds, and `f_write`
+returns `FR_DISK_ERR` with zero bytes written. `crc16_sd()` is CRC-16/XMODEM
+(poly `0x1021`, init 0), validated against the standard `"123456789"` → `0x31C3`
+vector, which `-DUSB_LOG=ON` also prints as a self-check. A refused block logs
+its response token, decoding `0x0b` as a CRC error and `0x0d` as a write error.
+Note that GCC rewrites the bit loop into a 256-entry table, so `0x1021` does not
+appear in the disassembly — look for the table load plus the two trailing
+`xchg_spi` calls in `xmit_datablock` instead.
+
+Both CRCs are now confirmed working on hardware. Anything the emulator writes to
+the card — save states, `atari800.cfg` — depended on the second one.
 
 Card contents: FAT32 (exFAT also works — `FF_FS_EXFAT` is 1 — but FAT32 is the
 safer default for SDHC). The emulator reads `\atari800\atari800.cfg` and searches
