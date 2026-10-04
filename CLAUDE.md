@@ -58,11 +58,13 @@ for a CDC connection that can never happen, so the board looks completely dead w
 `tusb_*`. If USB diagnostics ever go silent again, check this first: `_Static_assert(CFG_TUD_CDC == 1)`
 in any TU settles it in one build.
 
-Four build knobs: `-DUSB_LOG=ON` turns `printf`/`Log_print` into real output on the USB CDC port,
+Five build knobs: `-DUSB_LOG=ON` turns `printf`/`Log_print` into real output on the USB CDC port,
 `-DSD_LOG=ON` appends to `tari.log` on the card (`MNGR_DEBUG`), and `-DSYS_CLOCK_KHZ=` overrides the
 clock for testing — note that anything other than 252000 skews DVI timing. Both logs only start once
 execution reaches them, so neither helps with a hang before `stdio_init_all()`. The fourth is `-DKBD_USB=ON`
-for the USB keyboard, which is incompatible with `USB_LOG` (see below).
+for the USB keyboard, which is incompatible with `USB_LOG` (see below). The fifth is `-DHDMI_AUDIO=OFF`,
+which drops HDMI audio and puts a plain DVI signal on the connector (see *HDMI audio*); it is ON by
+default and the OFF image gets a `-noaudio` suffix.
 
 **There are no tests.** `configure.ac`, `Makefile.am`, `autogen.sh`, `.travis*`, `atari800.spec`, `debian/`,
 `src/libatari800/libatari800_test.c` and `tools/` are upstream autotools leftovers — not wired into the
@@ -71,8 +73,9 @@ file needs no CMakeLists edit (but does need a re-configure).
 
 **RAM used to be the binding constraint and no longer is.** On RP2040 it was a 256 KB budget run at ~87%
 full, and commit messages in `git log` are literally recorded RAM percentages
-(e.g. `RAM: 228640 B / 256 KB 87.22%`). RP2350B has 512 KB and the current build sits at **277 596 B
-(52.95%)**, flash at 3.48% of 16 MB. The link still prints `--print-memory-usage`, but there is now
+(e.g. `RAM: 228640 B / 256 KB 87.22%`). RP2350B has 512 KB and the current build sits at **363 792 B
+(69.39%)**, flash at 3.58% of 16 MB (290 812 B with `-DHDMI_AUDIO=OFF`; the difference is the audio
+queues). The link still prints `--print-memory-usage`, but there is now
 headroom to move banked memory *into* SRAM rather than out of it.
 
 The retarget dropped the hand-written linker script in favour of the SDK default. The custom one pulled
@@ -133,7 +136,8 @@ stack at boot and prints a high-water figure, so the real requirement is measura
   `multicore_lockout_victim_init()` so flash writes can stall it.
 - **Sound** — a `repeating_timer` at the POKEY sample rate (`snd_timer_callback`) walks the buffer that
   `PLATFORM_SoundWrite` captured from the core and pushes samples to PWM pins. The timer is re-armed from
-  the main loop whenever `libatari800_get_sound_frequency()` changes.
+  the main loop whenever `libatari800_get_sound_frequency()` changes. The same `PLATFORM_SoundWrite` also
+  feeds HDMI audio, which runs alongside PWM rather than replacing it (see *HDMI audio*).
 
 ### Zero-copy video
 
@@ -145,7 +149,7 @@ and the rightmost 40 of the visible area — five characters — cut off, which 
 like two or three. [main.cpp](src/main.cpp) now derives the offset from those variables rather than
 hardcoding it; it works out to **-32**, which lands exactly on the Atari's 40-column text field and drops
 8 columns symmetrically from each side of the visible area. A negative offset makes the renderer start
-further into each row; `input_buffer_end` is computed before the shift, so there is no overrun.
+further into each row; the copy length is clamped to what is left of the row, so there is no overrun.
 
 There is no blit. [src/screen.c](src/screen.c) defines `__screen[384*240]` as the one 8-bit framebuffer,
 `Screen_atari` points at it, and `main.cpp` hands that exact pointer to `graphics_set_buffer()`. Hence
@@ -159,21 +163,93 @@ API (`graphics_init`, `graphics_set_mode`, `graphics_set_buffer`, `graphics_set_
 backend header, and only the matching driver library is linked. Add a new display by implementing that
 header, not by touching emulator code.
 
-**The drivers are not palette-equivalent.** A framebuffer byte is a raw GTIA colour register value
-(`hue << 4 | luma`), so all 256 indices are live and `colours.c` assigns every one of them. VGA honours all
-256. **HDMI loses the top 16** (`0xF0`–`0xFF`, i.e. hue 15 at every luma): `BASE_HDMI_CTRL_INX` is 240, so
-indices 240–254 are reserved for sync signalling — [hdmi.c:545](drivers/hdmi/hdmi.c#L545) returns without
-storing those colours, and the scanline renderer at [hdmi.c:213](drivers/hdmi/hdmi.c#L213) additionally
-forces any pixel matching `(c & 0xf0) == 0xf0` to index 255, the background colour. Result: hue-15 artwork
-renders as flat background on DVI and correctly on VGA. Do not "fix" this by widening the palette write —
-the reserved entries are what generates HSYNC/VSYNC. Since DVI is this board's only wired output, this is
-now a limitation of the default build rather than of an optional backend, and it is the most likely
-explanation for a game whose colours look wrong in exactly one hue.
+**All 256 palette entries are real on DVI now.** A framebuffer byte is a raw GTIA colour register value
+(`hue << 4 | luma`), so all 256 indices are live and `colours.c` assigns every one of them. The driver used
+to index its symbol table with 8 bits and carve the sync codes out of the palette at 240–254, which turned
+hue 15 into flat background. The line buffer is now 16 bits per entry and the table has 512 entries
+(`conv_color`, 8 KB, 8 KB-aligned): 0–255 are the palette, and sync codes, the border colour
+(`INX_BG`), HDMI preambles and guard bands live at 256 and up. If you see `BASE_HDMI_CTRL_INX` or a
+`(c & 0xf0) == 0xf0` test in another driver or an old diff, that is the limitation this removed. Three
+things have to stay in step if the table is ever resized: the `in osr, 9` / `in x, 19` pair in the
+converter program, the `>> 13` used to load its X register, and the table's alignment.
 
 Related HDMI/TV-only side effect: their `graphics_set_mode()` calls `clrScr()` (VGA's does not). Because
 `main.cpp` passes the one buffer as both framebuffer and text buffer, that memsets 53×30×2 = 3180 bytes —
 roughly the top 8 scanlines — and `colours.c` / `colours_ntsc.c` / `colours_pal.c` call `graphics_set_mode`
 on every palette update, so palette changes flicker the top of the screen for a frame.
+
+### HDMI audio: pico_hdmi's packets over the PIO driver
+
+**Confirmed on hardware at 48 kHz mono**: picture and sound on one display, with the USB keyboard, in a
+build without logging. 44.1 and 32 kHz, stereo, and other displays have only been through a host-side
+model that expands each line buffer through `conv_color` and decodes the TMDS/TERC4 stream like a sink
+(sync, preambles, guard bands, packet types on the right lines, audio samples bit-exact, pixels against
+the palette). If some other display shows nothing, build with `-DHDMI_AUDIO=OFF` first: that is the old
+DVI signal apart from the 9-bit table.
+
+[pico_hdmi](https://github.com/fliperama86/pico_hdmi) is an HSTX library, and HSTX cannot reach this
+board's connector (see *Board facts*), so its output stage is unusable here. What is vendored under
+[drivers/pico_hdmi/](drivers/pico_hdmi/) is its packet layer only — `hstx_packet.c`, unmodified, plus the
+two headers it includes (`video_output.h` just for the `MODE_*` sync-polarity macros). It builds audio
+sample, ACR and InfoFrame packets and TERC4-encodes them into one 30-bit word per pixel clock.
+[hdmi_audio.c](drivers/hdmi/hdmi_audio.c) re-serialises those words into the PIO's pin order (72 words
+per island) and [hdmi.c](drivers/hdmi/hdmi.c) puts one island in every hsync pulse. Do not pull in the
+library's `hstx_data_island_queue.c`: it places code in `__scratch_x`, which is core 1's stack here.
+
+How an island gets onto the wire, since it is not obvious from the code: a line-buffer entry stands for
+two pixel clocks and is only an index, so arbitrary symbols cannot be written into the line. Instead 36
+table entries (`INX_DI_SLOTS`, two sets of 18) are *rewritten* every scanline with that line's 36 island
+symbols, and the line buffer points at them in order. Each set belongs to one of the two line buffers,
+so the set being rewritten is never the one being transmitted. This is also why the handler now builds
+every scanline rather than every second one — the second line of a doubled row copies its pixels from
+the other buffer — and why the two buffers alternate every line.
+
+Three stages, each lock-free single-producer/single-consumer:
+
+- core 0, `PLATFORM_SoundWrite` → `hdmi_audio_write_u8()` → an 8192-frame sample ring. POKEY output is
+  unsigned 8-bit and rests at 0, not mid-scale, so a DC blocker runs here; without it every underrun
+  (which inserts true zero) is a full-scale click.
+- core 1 main loop, `hdmi_audio_task()` → a 128-island queue. **Must stay on core 1**: the video interrupt
+  consumes the queue with no locking, which is only safe because it preempts this code rather than
+  racing it.
+- core 1 video interrupt, `hdmi_audio_line_island()`, once per scanline. The schedule is pico_hdmi's: ACR
+  and the audio InfoFrame inside vsync, the AVI InfoFrame on the first blanking line, ACR on every fourth
+  back-porch line, an audio packet whenever four samples' worth of pixel clock has elapsed, a null
+  packet otherwise.
+
+Only 32000, 44100 and 48000 Hz can be carried; any other `SOUND_RATE` mutes HDMI audio (and logs it)
+rather than playing at the wrong pitch. [data/atari800.cfg](data/atari800.cfg) uses 48000. `-DSD_LOG=ON` /
+`-DUSB_LOG=ON` print an `audio: ... buffered N, underruns N, overruns N` line every five seconds: underruns are audio slots
+that found the queue empty (expect a burst at start-up and whenever the UI is open, since the emulator
+stops producing sound), overruns are samples dropped because the ring was full. Either one climbing
+during normal play is audible. The init line also reports a serialiser self-check, which compares
+`hdmi_audio.c`'s lookup table against the `get_ser_diff_data()` the picture goes through — a mismatch
+would put islands on the wrong pins while video stays perfect.
+
+**The whole audio path runs from RAM, and has to.** `hdmi_audio.c`, `hstx_packet.c`, their lookup tables
+and libc's `memset`/`memcpy` are pulled out of flash by
+[default_text_excludes.incl](linker_overrides/default_text_excludes.incl) and its `rodata` twin, and the
+scanline handler uses plain loops (with `no-tree-loop-distribute-patterns`, or GCC turns them back into
+`memcpy` calls). Core 1 encodes 12 000 packets a second; from flash that code shares the 16 KB XIP cache
+with the emulator on core 0, and how much it loses depends on link layout. Symptom on hardware: one image
+had sound, the next — same sources, logging off — was silent, and a third with a few counters added
+worked again while still losing 2.6% of its audio slots (`encoded` short of `sent + silence` in
+`audio.txt`). `-DAUDIO_DIAG=ON` writes that counter line to `\audio.txt` at 20 s and 60 s and touches the
+card at no other time; use it rather than SD_LOG when the question is audio timing. A slot sent as silence
+is never made up, so the task also discards backlog beyond 125 ms instead of letting delay grow.
+Check any new code on this path with `nm`: it must land at `0x2000....`, and `objdump` of the handler
+must show no `veneer`.
+
+**Sound delivery depends on the frame throttle in `Atari800_Frame()`** ([atari.c](src/atari.c)). It paces
+every frame at the Atari's own rate (59.92 / 49.86 Hz), so samples arrive one frame at a time and at
+exactly the configured rate. It used to run six frames flat out and then wait for 100 ms to elapse,
+which delivered sound in 100 ms lumps; it also kept its start time in an `int`, so the comparison
+broke about 36 minutes after boot. Do not go back to batching frames.
+
+**An SD_LOG build no longer logs `alive:` every second.** Each log line is an open/append/close on
+core 0; once a second that stalled emulation for long enough to halve its speed and swallow key
+presses. What remains is the five-second block, which still stalls briefly — an SD_LOG image is for
+diagnosis, not for playing.
 
 ### libatari800 as the platform layer
 
@@ -353,7 +429,7 @@ Note the legacy naming: the microSD defines still say `SPI0` while `SDCARD_SPI_B
 
 Note that `drivers/` contains more backends than are built: only `ps2`, `fatfs`, `sdcard`, `nespad`,
 `psram-sram`, `graphics`, the selected display driver and — with `-DKBD_USB=ON` — `usbkbd` are added as
-subdirectories. `psram/` (the PIO PSRAM driver), `ps2kbd/`, `audio/`, `usb/`, `usbfs/`, `ws2812/` are
+subdirectories. `pico_hdmi/` has no CMakeLists of its own; `drivers/hdmi` compiles its one source file. `psram/` (the PIO PSRAM driver), `ps2kbd/`, `audio/`, `usb/`, `usbfs/`, `ws2812/` are
 present but unused.
 
 ## Board facts

@@ -1,0 +1,11 @@
+/* Override of pico_standard_link/script_include/default_text_excludes.incl.
+ * Everything excluded here lands in RAM (.data picks up the leftover .text).
+ * The SDK excludes libgcc and libm; this adds the HDMI audio path, which runs
+ * on core 1 twelve thousand times a second. Left in flash it competes for the
+ * 16 KB XIP cache with the emulator on core 0, and how badly depends on where
+ * the linker happened to put things - audio that worked in one build and was
+ * silent in the next, with no source change between them.
+ * memset and memcpy come along because that path calls them.
+ * Keep the file list identical to default_rodata_excludes.incl.
+ */
+*(EXCLUDE_FILE(*libgcc.a: *libm.a: *libc.a:*memset.o *libc.a:*memcpy.o *libg.a:*memset.o *libg.a:*memcpy.o *hstx_packet.c.o* *hdmi_audio.c.o*) .text*)

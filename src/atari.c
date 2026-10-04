@@ -1252,8 +1252,8 @@ void Atari800_Frame(void)
 {
 #ifndef BASIC
 	static int refresh_counter = 0;
-	static int frame_timer_start = 0;
-	if (!frame_timer_start) frame_timer_start = time_us_64();
+	/* When the frame being emulated is due, in ns since boot. */
+	static uint64_t frame_deadline_ns = 0;
 	switch (INPUT_key_code) {
 	case AKEY_COLDSTART:
 		Atari800_Coldstart();
@@ -1352,12 +1352,19 @@ void Atari800_Frame(void)
 #endif
 	Atari800_nframes++;
     if (!Atari800_turbo) { // Тормозилка
-		static int frame_cnt = 0;
-        if (++frame_cnt == (Atari800_tv_mode == Atari800_TV_PAL ? 5 : 6)) {
-		    while (time_us_64() - frame_timer_start < (Atari800_tv_mode == Atari800_TV_PAL ? 20000*6 : 16666*6)); // 60 Hz
-            frame_timer_start = time_us_64();
-            frame_cnt = 0;
-        }
+		/* Paced frame by frame, at the Atari's own rate. This used to let six
+		   frames run flat out and then wait for 100 ms to be up, which hands
+		   sound to the output in 100 ms lumps and reads the keyboard in
+		   bursts. A frame that runs long is made up by the following ones;
+		   more than 50 ms behind (the UI was open, turbo was on) and the
+		   schedule simply restarts from now. */
+		const uint64_t period_ns = (uint64_t)(1e9 / (Atari800_tv_mode == Atari800_TV_PAL ? Atari800_FPS_PAL : Atari800_FPS_NTSC));
+		const uint64_t now_ns = time_us_64() * 1000;
+		frame_deadline_ns += period_ns;
+		if (frame_deadline_ns + 50000000ull < now_ns)
+			frame_deadline_ns = now_ns;
+		else
+			while (time_us_64() * 1000 < frame_deadline_ns);
     }
 #ifndef LIBATARI800
 #ifdef BENCHMARK

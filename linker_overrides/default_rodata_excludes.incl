@@ -1,0 +1,5 @@
+/* Override of pico_standard_link/script_include/default_rodata_excludes.incl.
+ * See default_text_excludes.incl: the HDMI audio path's lookup tables (BCH,
+ * TERC4) have to be in RAM along with its code. Keep the two lists identical.
+ */
+*(EXCLUDE_FILE(*libgcc.a: *libm.a: *libc.a:*memset.o *libc.a:*memcpy.o *libg.a:*memset.o *libg.a:*memcpy.o *hstx_packet.c.o* *hdmi_audio.c.o*) .rodata*)

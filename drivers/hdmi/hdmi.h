@@ -68,6 +68,48 @@ static void graphics_set_flashmode(bool flash_line, bool flash_frame) {
     // dummy
 }
 
+/* HDMI audio. 1 turns the link from DVI into HDMI: every scanline carries a
+ * data island in its hsync pulse (audio samples, clock regeneration,
+ * InfoFrames) and active video gets its preamble and guard band. 0 is the
+ * plain DVI signal this driver always produced. Packets are built by the
+ * vendored pico_hdmi packet layer (drivers/pico_hdmi); only its HSTX output
+ * stage is unusable here, since HSTX cannot reach GPIO32-39. */
+#ifndef HDMI_AUDIO
+#define HDMI_AUDIO (1)
+#endif
+
+#if HDMI_AUDIO
+/* 32000, 44100 and 48000 are what HDMI can carry. Any other rate returns false
+   and mutes the stream rather than playing it at the wrong pitch. Callable from
+   either core; takes effect on the next hdmi_audio_task(). */
+bool hdmi_audio_set_sample_rate(uint32_t hz);
+
+/* Queue unsigned 8-bit samples, interleaved when channels == 2. Meant for the
+   core that runs the emulator; excess is dropped when the buffer is full. */
+void hdmi_audio_write_u8(const uint8_t *data, unsigned frames, unsigned channels);
+
+/* Turns queued samples into data islands. Must be polled from the core that
+   owns the video interrupt (the one that called graphics_init), in thread
+   context: the interrupt consumes what this produces without any locking. */
+void hdmi_audio_task(void);
+
+/* Audio slots that found the queue empty and sent silence instead, and samples
+   dropped because the buffer was full. Either one climbing is audible. */
+uint32_t hdmi_audio_underruns(void);
+/* The rate being sent, 0 while muted, and the samples waiting to be sent. */
+uint32_t hdmi_audio_rate(void);
+uint32_t hdmi_audio_buffered(void);
+int hdmi_audio_stats(char *buf, unsigned size);
+uint32_t hdmi_audio_overruns(void);
+
+/* Driver internals shared between hdmi.c and hdmi_audio.c. */
+#define HDMI_ISLAND_SYMBOLS (36) /* 2 guard + 32 packet + 2 guard */
+#define HDMI_ISLAND_WORDS (HDMI_ISLAND_SYMBOLS * 2)
+void hdmi_audio_init(void);
+const uint32_t *hdmi_audio_line_island(unsigned line);
+uint64_t hdmi_tmds_serialise(uint16_t ch2, uint16_t ch1, uint16_t ch0);
+#endif
+
 /* Number of video DMA interrupts taken so far. Zero and staying zero means the
    PIO/DMA chain never started; climbing means it is running and any missing
    picture is further downstream. */

@@ -743,6 +743,10 @@ void __time_critical_func(render_core)() {
 #ifdef KBD_USB
         usbkbd_task();
 #endif
+#if defined(HDMI) && HDMI_AUDIO
+        /* Has to be this core: the video interrupt consumes what it builds. */
+        hdmi_audio_task();
+#endif
         tick = time_us_64();
         tight_loop_contents();
     }
@@ -759,6 +763,10 @@ extern "C" void PLATFORM_SoundWrite(UBYTE const *buffer, unsigned int size)
 	memcpy(LIBATARI800_Sound_array, buffer, size);
 	sound_array_idx = 0;
 	sound_array_fill = size;
+#if defined(HDMI) && HDMI_AUDIO
+    /* POKEY output is unsigned 8-bit, interleaved when there are two chips. */
+    hdmi_audio_write_u8(buffer, size / Sound_out.channels, Sound_out.channels);
+#endif
 }
 
 #ifdef SOUND
@@ -895,6 +903,11 @@ int main() {
     if (!add_repeating_timer_us(-1000000 / hz, snd_timer_callback, NULL, &timer)) {
         printf("Failed to add timer");
     }
+#if defined(HDMI) && HDMI_AUDIO
+    if (!hdmi_audio_set_sample_rate(hz)) {
+        printf("HDMI audio muted: %d Hz is not 32000, 44100 or 48000\n", hz);
+    }
+#endif
 #endif
 
     while(true) {
@@ -906,16 +919,43 @@ int main() {
             if (!add_repeating_timer_us(-1000000 / hz, snd_timer_callback, NULL, &timer)) {
 		        printf("Failed to update timer");
 	        }
+#if defined(HDMI) && HDMI_AUDIO
+            if (!hdmi_audio_set_sample_rate(hz)) {
+                printf("HDMI audio muted: %d Hz is not 32000, 44100 or 48000\n", hz);
+            }
+#endif
         }
         snd_channels = libatari800_get_num_sound_channels();
 #endif
         libatari800_next_frame(&input_map);
         {
             static unsigned frames = 0;
+#if defined(AUDIO_DIAG) && defined(HDMI) && HDMI_AUDIO
+            /* Two snapshots and nothing else, so the card is touched twice in
+               the whole run: a periodic log changes the timing it is meant to
+               observe. */
+            if (frames + 1 == 1200u || frames + 1 == 3600u) {
+                char line[256];
+                int n = snprintf(line, sizeof line, "frame %u: ", frames + 1);
+                n += hdmi_audio_stats(line + n, sizeof line - n - 2);
+                line[n++] = '\n';
+                FIL df;
+                if (f_open(&df, "\\audio.txt", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK) {
+                    UINT bw;
+                    f_write(&df, line, n, &bw);
+                    f_close(&df);
+                }
+            }
+#endif
             if (++frames % 60u == 0) {
 #ifdef HDMI
+#ifndef MNGR_DEBUG
+                /* Not to the card: a log line there is an open, an append and
+                   a close on the emulator's core, and once a second that was
+                   long enough to stall emulation and swallow key presses. */
                 printf("alive: %u frames, video irqs=%u\n",
                        frames, (unsigned)hdmi_dbg_irq_count());
+#endif
                 /* Full register dump every ~5 s: enough to diagnose, not
                    enough to drown the log. Guarded because printf is a no-op
                    without USB_LOG but hdmi_dbg_dump() prints via <stdio.h>
@@ -927,6 +967,14 @@ int main() {
                            stack_used(),
                            (unsigned)(&__StackTop - &__StackBottom));
                     hdmi_dbg_dump();
+#if HDMI_AUDIO && defined(SOUND)
+                    /* hdmi_dbg_dump() prints through <stdio.h>, which goes
+                       nowhere in a KBD_USB build, so the audio figures are
+                       repeated here where SD_LOG can see them. */
+                    printf("audio: %u frames, emu %d Hz x%d, hdmi %u Hz, buffered %u, underruns %u, overruns %u\n",
+                           frames, hz, snd_channels, (unsigned)hdmi_audio_rate(), (unsigned)hdmi_audio_buffered(),
+                           (unsigned)hdmi_audio_underruns(), (unsigned)hdmi_audio_overruns());
+#endif
                 }
 #endif
 #else

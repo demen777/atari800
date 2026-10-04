@@ -22,6 +22,7 @@ static enum graphics_mode_t graphics_mode = GRAPHICSMODE_DEFAULT;
 
 //буфер  палитры 256 цветов в формате R8G8B8
 static uint32_t palette[256];
+static uint32_t bgcolor;
 
 
 #define SCREEN_WIDTH (320)
@@ -45,15 +46,38 @@ static int dma_chan;
 static int dma_chan_pal_conv_ctrl;
 static int dma_chan_pal_conv;
 
+/* A scanline is 400 entries of two pixel clocks each: 48 hsync, 24 back
+   porch, 320 picture, 8 front porch. Each entry is a 9-bit index into
+   conv_color, which holds the two serialised TMDS symbols it stands for. */
+#define LINE_UNITS (400)
+#define H_SYNC_UNITS (48)
+#define H_ACTIVE_START (72)
+#define H_ACTIVE_END (H_ACTIVE_START + SCREEN_WIDTH)
+
+/* Indices 0-255 are the picture's palette, all of them. Everything the link
+   itself needs lives above, which is what the ninth index bit is for: with an
+   8-bit index the sync codes had to be carved out of the palette. */
+#define CONV_ENTRIES (512)
+#define INX_SYNC (256)           /* +1 hsync asserted, +2 vsync asserted */
+#define INX_BG (260)             /* border colour */
+#define INX_DI_PREAMBLE (261)    /* +1 inside vsync; hsync asserted */
+#define INX_VIDEO_PREAMBLE (263)
+#define INX_VIDEO_GUARD (264)
+/* Two sets of entries that are rewritten every scanline with that line's data
+   island, 18 entries for 36 symbols. A set belongs to one line buffer, so the
+   set being rewritten is never the one being transmitted. */
+#define INX_DI_SLOTS (272)
+#define DI_SLOT_ENTRIES (18)
+#define DI_PREAMBLE_UNITS (4)
+
 //DMA буферы
 //основные строчные данные
-static uint32_t* __not_in_flash("hdmi_data") dma_lines[2] = { NULL,NULL };
-static uint32_t* __not_in_flash("hdmi_data") DMA_BUF_ADDR[2];
+static uint16_t __not_in_flash("hdmi_data") dma_lines[2][LINE_UNITS];
+static uint16_t* __not_in_flash("hdmi_data") DMA_BUF_ADDR[2];
 
 //ДМА палитра для конвертации
-//в хвосте этой памяти выделяется dma_data
-static alignas(4096)
-uint32_t conv_color[1224];
+static alignas(CONV_ENTRIES * 16)
+uint32_t conv_color[CONV_ENTRIES * 4];
 
 
 //индекс, проверяющий зависание
@@ -61,14 +85,15 @@ static uint32_t irq_inx = 0;
 
 //функции и константы HDMI
 
-#define BASE_HDMI_CTRL_INX (240)
 //программа конвертации адреса
+/* Turns a 9-bit index into the address of its 16-byte conv_color entry: x holds
+   the table's address >> 13, so isr ends up as x:index:0000. */
 
 uint16_t pio_program_instructions_conv_HDMI[] = {
     //         //     .wrap_target
     0x80a0, //  0: pull   block
-    0x40e8, //  1: in     osr, 8
-    0x4034, //  2: in     x, 20
+    0x40e9, //  1: in     osr, 9
+    0x4033, //  2: in     x, 19
     0x8020, //  3: push   block
     //     .wrap
 };
@@ -151,6 +176,16 @@ static uint tmds_encoder(const uint8_t d8) {
     return d_out;
 }
 
+#if HDMI_AUDIO
+uint64_t hdmi_tmds_serialise(uint16_t ch2, uint16_t ch1, uint16_t ch0) {
+    return get_ser_diff_data(ch2, ch1, ch0);
+}
+#endif
+
+static inline __attribute__((always_inline)) void fill16(uint16_t* p, const uint16_t v, int n) {
+    while (n-- > 0) *p++ = v;
+}
+
 uint32_t hdmi_dbg_irq_count(void) { return irq_inx; }
 
 /* A frozen irq count means the chain stopped rather than never started, and a
@@ -163,6 +198,10 @@ void hdmi_dbg_dump(void) {
            (unsigned)irq_inx, (unsigned)dma_hw->ints0,
            (unsigned)PIO_VIDEO->ctrl, (unsigned)PIO_VIDEO->fdebug,
            (unsigned)PIO_VIDEO->flevel);
+#if HDMI_AUDIO
+    printf("hdmi audio: underruns=%u overruns=%u\n",
+           (unsigned)hdmi_audio_underruns(), (unsigned)hdmi_audio_overruns());
+#endif
     for (int i = 0; i < 4; i++) {
         const int c = ch[i];
         if (c < 0) continue;
@@ -192,145 +231,123 @@ static void pio_set_x(PIO pio, const int sm, uint32_t v) {
 }
 
 
+/* Nothing in here may run from flash. The optimize attribute stops GCC turning
+   the copy loops back into calls to memcpy, which lives there. */
+__attribute__((optimize("no-tree-loop-distribute-patterns")))
 static void __not_in_flash_func(dma_handler_HDMI)() {
     static uint32_t inx_buf_dma;
-    static uint line = 0;
+    /* Starts on the last line so the first one built is row 0's first
+       scanline: an odd line copies its picture from the previous buffer. */
+    static uint line = 524;
     irq_inx++;
 
     dma_hw->ints0 = 1u << dma_chan_ctrl;
-    dma_channel_set_read_addr(dma_chan_ctrl, &DMA_BUF_ADDR[inx_buf_dma & 1], false);
+
+    /* The line that has just started is going out of one buffer; build the
+       next line in the other and queue it. Every line gets its own buffer
+       contents, because every line carries a different data island. */
+    inx_buf_dma ^= 1;
+    dma_channel_set_read_addr(dma_chan_ctrl, &DMA_BUF_ADDR[inx_buf_dma], false);
 
     line = line >= 524 ? 0 : line + 1;
 
-    if ((line & 1) == 0) return;
+    uint16_t* activ_buf = dma_lines[inx_buf_dma];
+    const bool vsync = (line >= 490) && (line < 492);
+    //ССИ
+    // --|_|---|_|---|_|----
+    //---|___________|-----
+    const uint16_t sync_idle = INX_SYNC + (vsync ? 2 : 0);
+    const uint16_t sync_h = sync_idle + 1;
 
-    inx_buf_dma++;
+#if HDMI_AUDIO
+    /* Preamble, then the island, then the rest of the hsync pulse. The island
+       entries themselves never change - what they point at does. */
+    const uint16_t slots = INX_DI_SLOTS + inx_buf_dma * DI_SLOT_ENTRIES;
+    const uint32_t* island = hdmi_audio_line_island(line);
+    uint32_t* slot_words = &conv_color[slots * 4];
+    for (int i = 0; i < HDMI_ISLAND_WORDS; i++) slot_words[i] = island[i];
+    fill16(activ_buf, INX_DI_PREAMBLE + (vsync ? 1 : 0), DI_PREAMBLE_UNITS);
+    for (int i = 0; i < DI_SLOT_ENTRIES; i++) activ_buf[DI_PREAMBLE_UNITS + i] = slots + i;
+    fill16(activ_buf + DI_PREAMBLE_UNITS + DI_SLOT_ENTRIES, sync_h,
+           H_SYNC_UNITS - DI_PREAMBLE_UNITS - DI_SLOT_ENTRIES);
+#else
+    fill16(activ_buf, sync_h, H_SYNC_UNITS);
+#endif
 
+    if (!graphics_buffer || line >= 480) {
+        //ССИ без изображения, кадровый синхроимпульс
+        fill16(activ_buf + H_SYNC_UNITS, sync_idle, LINE_UNITS - H_SYNC_UNITS);
+        return;
+    }
 
-    uint8_t* activ_buf = (uint8_t *)dma_lines[inx_buf_dma & 1];
+    //область изображения
+#if HDMI_AUDIO
+    /* HDMI wants active video announced: 8 pixels of preamble and a 2-pixel
+       guard band at the end of the back porch. */
+    fill16(activ_buf + H_SYNC_UNITS, INX_SYNC, H_ACTIVE_START - H_SYNC_UNITS - 5);
+    fill16(activ_buf + H_ACTIVE_START - 5, INX_VIDEO_PREAMBLE, 4);
+    activ_buf[H_ACTIVE_START - 1] = INX_VIDEO_GUARD;
+#else
+    fill16(activ_buf + H_SYNC_UNITS, INX_SYNC, H_ACTIVE_START - H_SYNC_UNITS);
+#endif
+    fill16(activ_buf + H_ACTIVE_END, INX_SYNC, LINE_UNITS - H_ACTIVE_END);
 
-    if (graphics_buffer && line < 480 ) {
-        //область изображения
-        uint8_t* input_buffer = &graphics_buffer[(line / 2) * graphics_buffer_width];
-        uint8_t* output_buffer = activ_buf + 72; //для выравнивания синхры;
-        int y = line / 2;
-        switch (graphics_mode) {
-            case GRAPHICSMODE_DEFAULT:
-            case VGA_320x240x256:
-                //заполняем пространство сверху и снизу графического буфера
-                if (false || (graphics_buffer_shift_y > y) || (y >= (graphics_buffer_shift_y + graphics_buffer_height))
-                    || (graphics_buffer_shift_x >= SCREEN_WIDTH) || (
-                        (graphics_buffer_shift_x + graphics_buffer_width) < 0)) {
-                    memset(output_buffer, 255,SCREEN_WIDTH);
-                    break;
+    uint16_t* output_buffer = activ_buf + H_ACTIVE_START;
+    if (line & 1) {
+        /* Second scanline of a doubled row: the other buffer holds the first. */
+        const uint16_t* first = dma_lines[inx_buf_dma ^ 1] + H_ACTIVE_START;
+        for (int i = 0; i < SCREEN_WIDTH; i++) output_buffer[i] = first[i];
+        return;
+    }
+
+    const int y = line / 2;
+    switch (graphics_mode) {
+        case TEXTMODE_DEFAULT:
+        case TEXTMODE_53x30: {
+            *output_buffer++ = INX_BG;
+
+            for (int x = 0; x < TEXTMODE_COLS; x++) {
+                const uint16_t offset = (y / 8) * (TEXTMODE_COLS * 2) + x * 2;
+                const uint8_t c = text_buffer[offset];
+                const uint8_t colorIndex = text_buffer[offset + 1];
+                uint8_t glyph_row = font_6x8[c * 8 + y % 8];
+
+                for (int bit = 6; bit--;) {
+                    *output_buffer++ = glyph_row & 1
+                                           ? textmode_palette[colorIndex & 0xf] //цвет шрифта
+                                           : textmode_palette[colorIndex >> 4]; //цвет фона
+
+                    glyph_row >>= 1;
                 }
+            }
+            *output_buffer = INX_BG;
+            break;
+        }
+        default: {
+            //пространство слева от буфера, сам видеобуфер, пространство справа
+            const int row = y - graphics_buffer_shift_y;
+            int left = graphics_buffer_shift_x;
+            int skip = 0;
+            if (left < 0) {
+                skip = -left;
+                left = 0;
+            }
+            int n = graphics_buffer_width - skip;
+            if (n > SCREEN_WIDTH - left) n = SCREEN_WIDTH - left;
 
-                uint8_t* activ_buf_end = output_buffer + SCREEN_WIDTH;
-            //рисуем пространство слева от буфера
-                for (int i = graphics_buffer_shift_x; i-- > 0;) {
-                    *output_buffer++ = 255;
-                }
-
-            //рисуем сам видеобуфер+пространство справа
-                input_buffer = &graphics_buffer[(y - graphics_buffer_shift_y) * graphics_buffer_width];
-
-                const uint8_t* input_buffer_end = input_buffer + graphics_buffer_width;
-
-                if (graphics_buffer_shift_x < 0) input_buffer -= graphics_buffer_shift_x;
-
-                while (activ_buf_end > output_buffer) {
-                    if (input_buffer < input_buffer_end) {
-                        uint8_t i_color = *input_buffer++;
-                        i_color = ((i_color & 0xf0) == 0xf0) ? 255 : i_color;
-                        *output_buffer++ = i_color;
-                    }
-                    else
-                        *output_buffer++ = 255;
-                }
-
-                break;
-
-            case TEXTMODE_DEFAULT:
-            case TEXTMODE_53x30: {
-                *output_buffer++ = 255;
-
-                for (int x = 0; x < TEXTMODE_COLS; x++) {
-                    const uint16_t offset = (y / 8) * (TEXTMODE_COLS * 2) + x * 2;
-                    const uint8_t c = text_buffer[offset];
-                    const uint8_t colorIndex = text_buffer[offset + 1];
-                    uint8_t glyph_row = font_6x8[c * 8 + y % 8];
-
-                    for (int bit = 6; bit--;) {
-                        *output_buffer++ = glyph_row & 1
-                                               ? textmode_palette[colorIndex & 0xf] //цвет шрифта
-                                               : textmode_palette[colorIndex >> 4]; //цвет фона
-
-                        glyph_row >>= 1;
-                    }
-                }
-                *output_buffer = 255;
+            if ((row < 0) || (row >= graphics_buffer_height) || (n <= 0)) {
+                fill16(output_buffer, INX_BG, SCREEN_WIDTH);
                 break;
             }
-            default:
-                for (int i = SCREEN_WIDTH; i--;) {
-                    uint8_t i_color = *input_buffer++;
-                    i_color = (i_color & 0xf0) == 0xf0 ? 255 : i_color;
-                    *output_buffer++ = i_color;
-                }
-                break;
+
+            fill16(output_buffer, INX_BG, left);
+            output_buffer += left;
+            const uint8_t* input_buffer = &graphics_buffer[row * graphics_buffer_width + skip];
+            for (int i = 0; i < n; i++) output_buffer[i] = input_buffer[i];
+            fill16(output_buffer + n, INX_BG, SCREEN_WIDTH - left - n);
+            break;
         }
-
-
-        // memset(activ_buf,2,320);//test
-
-        //ССИ
-        //для выравнивания синхры
-
-        // --|_|---|_|---|_|----
-        //---|___________|-----
-        memset(activ_buf + 48,BASE_HDMI_CTRL_INX, 24);
-        memset(activ_buf,BASE_HDMI_CTRL_INX + 1, 48);
-        memset(activ_buf + 392,BASE_HDMI_CTRL_INX, 8);
-
-        //без выравнивания
-        // --|_|---|_|---|_|----
-        //------|___________|----
-        //   memset(activ_buf+320,BASE_HDMI_CTRL_INX,8);
-        //   memset(activ_buf+328,BASE_HDMI_CTRL_INX+1,48);
-        //   memset(activ_buf+376,BASE_HDMI_CTRL_INX,24);
     }
-    else {
-        if ((line >= 490) && (line < 492)) {
-            //кадровый синхроимпульс
-            //для выравнивания синхры
-            // --|_|---|_|---|_|----
-            //---|___________|-----
-            memset(activ_buf + 48,BASE_HDMI_CTRL_INX + 2, 352);
-            memset(activ_buf,BASE_HDMI_CTRL_INX + 3, 48);
-            //без выравнивания
-            // --|_|---|_|---|_|----
-            //-------|___________|----
-
-            // memset(activ_buf,BASE_HDMI_CTRL_INX+2,328);
-            // memset(activ_buf+328,BASE_HDMI_CTRL_INX+3,48);
-            // memset(activ_buf+376,BASE_HDMI_CTRL_INX+2,24);
-        }
-        else {
-            //ССИ без изображения
-            //для выравнивания синхры
-
-            memset(activ_buf + 48,BASE_HDMI_CTRL_INX, 352);
-            memset(activ_buf,BASE_HDMI_CTRL_INX + 1, 48);
-
-            // memset(activ_buf,BASE_HDMI_CTRL_INX,328);
-            // memset(activ_buf+328,BASE_HDMI_CTRL_INX+1,48);
-            // memset(activ_buf+376,BASE_HDMI_CTRL_INX,24);
-        };
-    }
-
-
-    // y=(y==524)?0:(y+1);
-    // inx_buf_dma++;
 }
 
 
@@ -384,22 +401,19 @@ static inline bool hdmi_init() {
 
     offs_prg1 = pio_add_program(PIO_VIDEO_ADDR, &pio_program_conv_addr_HDMI);
     offs_prg0 = pio_add_program(PIO_VIDEO, &program_PIO_HDMI);
-    pio_set_x(PIO_VIDEO_ADDR, SM_conv, ((uint32_t)conv_color >> 12));
+    pio_set_x(PIO_VIDEO_ADDR, SM_conv, ((uint32_t)conv_color >> 13));
 
     //заполнение палитры
-    for (int ci = 0; ci < 240; ci++) graphics_set_palette(ci, palette[ci]); //
+    for (int ci = 0; ci < 256; ci++) graphics_set_palette(ci, palette[ci]); //
+    graphics_set_bgcolor(bgcolor);
 
-    //255 - цвет фона
-    graphics_set_palette(255, palette[255]);
-
-
-    //240-243 служебные данные(синхра) напрямую вносим в массив -конвертер
+    //служебные данные(синхра) напрямую вносим в массив -конвертер
     uint64_t* conv_color64 = (uint64_t *)conv_color;
     const uint16_t b0 = 0b1101010100;
     const uint16_t b1 = 0b0010101011;
     const uint16_t b2 = 0b0101010100;
     const uint16_t b3 = 0b1010101011;
-    const int base_inx = BASE_HDMI_CTRL_INX;
+    const int base_inx = INX_SYNC;
 
     conv_color64[2 * base_inx + 0] = get_ser_diff_data(b0, b0, b3);
     conv_color64[2 * base_inx + 1] = get_ser_diff_data(b0, b0, b3);
@@ -412,6 +426,25 @@ static inline bool hdmi_init() {
 
     conv_color64[2 * (base_inx + 3) + 0] = get_ser_diff_data(b0, b0, b0);
     conv_color64[2 * (base_inx + 3) + 1] = get_ser_diff_data(b0, b0, b0);
+
+#if HDMI_AUDIO
+    /* HDMI 1.3a table 5-2: CTL0-3 on channels 1 and 2 say what follows the
+       control period - 1000 a video period, 1010 a data island. Channel 0
+       keeps carrying sync. The guard band symbols are table 5-5. */
+    conv_color64[2 * INX_DI_PREAMBLE + 0] = get_ser_diff_data(b1, b1, b2);
+    conv_color64[2 * INX_DI_PREAMBLE + 1] = get_ser_diff_data(b1, b1, b2);
+
+    conv_color64[2 * (INX_DI_PREAMBLE + 1) + 0] = get_ser_diff_data(b1, b1, b0);
+    conv_color64[2 * (INX_DI_PREAMBLE + 1) + 1] = get_ser_diff_data(b1, b1, b0);
+
+    conv_color64[2 * INX_VIDEO_PREAMBLE + 0] = get_ser_diff_data(b0, b1, b3);
+    conv_color64[2 * INX_VIDEO_PREAMBLE + 1] = get_ser_diff_data(b0, b1, b3);
+
+    conv_color64[2 * INX_VIDEO_GUARD + 0] = get_ser_diff_data(0b1011001100, 0b0100110011, 0b1011001100);
+    conv_color64[2 * INX_VIDEO_GUARD + 1] = get_ser_diff_data(0b1011001100, 0b0100110011, 0b1011001100);
+
+    hdmi_audio_init();
+#endif
 
     //настройка PIO SM для конвертации
 
@@ -467,15 +500,21 @@ static inline bool hdmi_init() {
            (unsigned)PIO_VIDEO->sm[SM_video].clkdiv);
     printf("hdmi: clk=GP%d data=GP%d conv_color=%p (x=%08x)\n",
            beginHDMI_PIN_clk, beginHDMI_PIN_data,
-           (void *)conv_color, (unsigned)((uint32_t)conv_color >> 12));
+           (void *)conv_color, (unsigned)((uint32_t)conv_color >> 13));
 
     //настройки DMA
-    dma_lines[0] = &conv_color[1024];
-    dma_lines[1] = &conv_color[1124];
+    /* Both buffers start as a plain blank line, so nothing references an
+       island slot before the interrupt has filled one. */
+    for (int i = 0; i < 2; i++) {
+        fill16(dma_lines[i], INX_SYNC + 1, H_SYNC_UNITS);
+        fill16(dma_lines[i] + H_SYNC_UNITS, INX_SYNC, LINE_UNITS - H_SYNC_UNITS);
+    }
 
     //основной рабочий канал
+    /* 16-bit transfers: the bus replicates the half-word across the FIFO word
+       and the converter takes its low 9 bits. */
     dma_channel_config cfg_dma = dma_channel_get_default_config(dma_chan);
-    channel_config_set_transfer_data_size(&cfg_dma, DMA_SIZE_8);
+    channel_config_set_transfer_data_size(&cfg_dma, DMA_SIZE_16);
     channel_config_set_chain_to(&cfg_dma, dma_chan_ctrl); // chain to other channel
 
     channel_config_set_read_increment(&cfg_dma, true);
@@ -492,7 +531,7 @@ static inline bool hdmi_init() {
         &cfg_dma,
         &PIO_VIDEO_ADDR->txf[SM_conv], // Write address
         &dma_lines[0][0], // read address
-        400, //
+        LINE_UNITS, //
         false // Don't start yet
     );
 
@@ -584,18 +623,18 @@ void graphics_set_mode(enum graphics_mode_t mode) {
     clrScr(0);
 };
 
-void graphics_set_palette(uint8_t i, uint32_t color888) {
-    palette[i] = color888 & 0x00ffffff;
-
-
-    if ((i >= BASE_HDMI_CTRL_INX) && (i != 255)) return; //не записываем "служебные" цвета
-
+static void set_conv_color(const int inx, const uint32_t color888) {
     uint64_t* conv_color64 = (uint64_t *)conv_color;
     const uint8_t R = (color888 >> 16) & 0xff;
     const uint8_t G = (color888 >> 8) & 0xff;
     const uint8_t B = (color888 >> 0) & 0xff;
-    conv_color64[i * 2] = get_ser_diff_data(tmds_encoder(R), tmds_encoder(G), tmds_encoder(B));
-    conv_color64[i * 2 + 1] = conv_color64[i * 2] ^ 0x0003ffffffffffffl;
+    conv_color64[inx * 2] = get_ser_diff_data(tmds_encoder(R), tmds_encoder(G), tmds_encoder(B));
+    conv_color64[inx * 2 + 1] = conv_color64[inx * 2] ^ 0x0003ffffffffffffl;
+}
+
+void graphics_set_palette(uint8_t i, uint32_t color888) {
+    palette[i] = color888 & 0x00ffffff;
+    set_conv_color(i, color888);
 };
 
 void graphics_set_buffer(uint8_t* buffer, uint16_t width, uint16_t height) {
@@ -638,9 +677,10 @@ void graphics_init() {
     hdmi_init();
 }
 
-void graphics_set_bgcolor(uint32_t color888) //определяем зарезервированный цвет в палитре
+void graphics_set_bgcolor(uint32_t color888) //цвет фона - отдельная запись вне палитры
 {
-    graphics_set_palette(255, color888);
+    bgcolor = color888 & 0x00ffffff;
+    set_conv_color(INX_BG, color888);
 };
 
 void graphics_set_offset(int x, int y) {
