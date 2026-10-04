@@ -174,6 +174,24 @@ so `KBD_USB` turns `pico_enable_stdio_usb` off and CMake **refuses**
 `-DKBD_USB=ON -DUSB_LOG=ON` outright rather than silently dropping the log.
 Use `-DSD_LOG=ON` for diagnostics in that configuration.
 
+**It is serviced from core 1, not core 0, and that is load-bearing.** The
+emulator's UI (`UI_Run` via `Atari800_Frame`) spins inside `GetKeyPress()`
+polling `PLATFORM_Keyboard()`, so `libatari800_next_frame()` does not return
+while a menu is open. Anything driven from core 0's main loop is therefore
+starved for as long as the UI is up — which presented as a keyboard that typed
+fine in Memo Pad and went completely dead the moment F1 opened the menu. PS/2
+never had this problem because it is interrupt-driven. `render_core()` on core 1
+spins regardless, so both `usbkbd_init()` and `usbkbd_task()` live there;
+`tuh_init()` has to run on the same core as `tuh_task()` because it is what
+enables the USB interrupt.
+
+One consequence to be aware of: `handleScancode()` now runs on core 1, and its
+Ctrl/Shift+Fn paths call `StateSav_*`, which touches FatFS. With `FF_FS_LOCK`
+at 0 that is unsynchronised against core 0 doing its own card I/O. The PS/2 path
+has the same hazard from an ISR, so this is not new in kind, but a save state
+triggered while the emulator is loading a disk is a plausible way to corrupt
+both.
+
 The driver translates HID usages into **XT set-1 scancodes** and calls
 `handleScancode()`, rather than feeding HID in directly. That function is not a
 keymap: it also implements the joystick emulation on QWE/ASD/ZXC and the keypad,

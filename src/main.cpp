@@ -698,6 +698,17 @@ void __time_critical_func(render_core)() {
     graphics_set_offset(0, 0);
     graphics_set_flashmode(false, false);
     printf("graphics_init done on core1\n");
+#ifdef KBD_USB
+    /* Deliberately on core 1. The emulator's UI (UI_Run via Atari800_Frame)
+       spins inside GetKeyPress() polling PLATFORM_Keyboard(), so
+       libatari800_next_frame() does not return while a menu is open and
+       anything serviced from core 0's main loop is starved - which showed up
+       as a keyboard that typed fine but went dead the moment F1 opened the
+       menu. This loop keeps running regardless. tuh_init() must happen on the
+       same core as tuh_task(), since it is what enables the USB interrupt. */
+    usbkbd_init();
+    printf("usbkbd_init done on core1 (native USB host; no CDC in this build)\n");
+#endif
     sem_acquire_blocking(&vga_start_semaphore);
     // 60 FPS loop
 #define frame_tick (16666)
@@ -719,6 +730,9 @@ void __time_critical_func(render_core)() {
             last_input_tick = tick;
             nespad_update();
         }
+#ifdef KBD_USB
+        usbkbd_task();
+#endif
         tick = time_us_64();
         tight_loop_contents();
     }
@@ -823,10 +837,7 @@ int main() {
     init_psram();
     printf("init_psram done\n");
 
-#ifdef KBD_USB
-    usbkbd_init();
-    printf("usbkbd_init done (native USB host; no CDC on this build)\n");
-#endif
+    /* The USB host is brought up on core 1, not here - see render_core(). */
 
     /* Start the display before the emulator: it depends only on the static
        __screen buffer, and bringing it up first means a failure further down
@@ -887,9 +898,6 @@ int main() {
 	        }
         }
         snd_channels = libatari800_get_num_sound_channels();
-#endif
-#ifdef KBD_USB
-        usbkbd_task();
 #endif
         libatari800_next_frame(&input_map);
         {
