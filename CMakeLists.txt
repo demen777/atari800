@@ -29,6 +29,7 @@ option(TFT "Enable TFT display" OFF)
 option(ILI9341 "Enable TFT ILI9341 display" OFF)
 option(TV "Enable composite TV output" OFF)
 option(USB_LOG "Send printf/Log_print to the USB CDC port (bring-up diagnostics)" OFF)
+option(KBD_USB "USB HID keyboard on the native USB port (host mode)" OFF)
 option(SD_LOG "Append printf/Log_print to \\atari.log on the SD card (MNGR_DEBUG)" OFF)
 set(SYS_CLOCK_KHZ 252000 CACHE STRING "System clock in kHz; 252000 gives an exact DVI pixel clock")
 option(FLASH_SIZE "Target Flash Size" 16384)
@@ -53,6 +54,9 @@ set(FAMILY rp2350)
 set(BOARD pico_sdk)
 
 add_subdirectory(drivers/ps2)
+IF (KBD_USB)
+    add_subdirectory(drivers/usbkbd)
+ENDIF ()
 add_subdirectory(drivers/fatfs)
 add_subdirectory(drivers/sdcard)
 add_subdirectory(drivers/nespad)
@@ -229,6 +233,22 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE SYS_CLOCK_KHZ=${SYS_CLOCK_KHZ
 IF (NOT SYS_CLOCK_KHZ EQUAL 252000)
     message(WARNING "SYS_CLOCK_KHZ=${SYS_CLOCK_KHZ} will skew DVI timing; 252000 is the only exact setting")
     SET(BUILD_NAME "${BUILD_NAME}-${SYS_CLOCK_KHZ}kHz")
+ENDIF ()
+
+# Host mode owns the native USB controller, so there is no CDC device left to
+# print to. Rather than silently dropping the log - which cost a lot of time
+# earlier in this port - refuse the combination outright.
+IF (KBD_USB AND USB_LOG)
+    message(FATAL_ERROR
+            "KBD_USB and USB_LOG are mutually exclusive: USB host mode removes "
+            "the CDC port that USB_LOG prints to. Use -DSD_LOG=ON instead.")
+ENDIF ()
+
+IF (KBD_USB)
+    target_link_libraries(${PROJECT_NAME} PRIVATE usbkbd)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE KBD_USB)
+    pico_enable_stdio_usb(${PROJECT_NAME} 0)
+    SET(BUILD_NAME "${BUILD_NAME}-usbkbd")
 ENDIF ()
 
 IF (USB_LOG)

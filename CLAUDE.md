@@ -58,10 +58,11 @@ for a CDC connection that can never happen, so the board looks completely dead w
 `tusb_*`. If USB diagnostics ever go silent again, check this first: `_Static_assert(CFG_TUD_CDC == 1)`
 in any TU settles it in one build.
 
-Three bring-up knobs: `-DUSB_LOG=ON` turns `printf`/`Log_print` into real output on the USB CDC port,
+Four build knobs: `-DUSB_LOG=ON` turns `printf`/`Log_print` into real output on the USB CDC port,
 `-DSD_LOG=ON` appends to `tari.log` on the card (`MNGR_DEBUG`), and `-DSYS_CLOCK_KHZ=` overrides the
 clock for testing — note that anything other than 252000 skews DVI timing. Both logs only start once
-execution reaches them, so neither helps with a hang before `stdio_init_all()`.
+execution reaches them, so neither helps with a hang before `stdio_init_all()`. The fourth is `-DKBD_USB=ON`
+for the USB keyboard, which is incompatible with `USB_LOG` (see below).
 
 **There are no tests.** `configure.ac`, `Makefile.am`, `autogen.sh`, `.travis*`, `atari800.spec`, `debian/`,
 `src/libatari800/libatari800_test.c` and `tools/` are upstream autotools leftovers — not wired into the
@@ -158,6 +159,46 @@ emulator is driven frame-by-frame from `main()`. Input is an `input_template_t` 
 `nespad_update()` (two NES pads, on core 1), and the Wii joystick via
 [src/util_Wii_Joy.c](src/util_Wii_Joy.c). Keyboard handling is raw scancode → `input_map` field; there is
 no intermediate keymap table.
+
+### USB keyboard: HID translated to XT scancodes
+
+`-DKBD_USB=ON` adds [drivers/usbkbd/](drivers/usbkbd/), a USB HID keyboard host
+on the **native** USB controller. Verified on hardware at 252 MHz: `tuh_init`
+returns 1, the keyboard enumerates (`proto=1`), and multi-key rollover works.
+The board's wiki advertises host capability on its PIO-USB port instead, but
+pico-spec drives this board through the native controller and that is the path
+that was tested; PIO-USB would additionally need the Pico-PIO-USB library.
+
+**It costs the USB CDC log.** One controller cannot be host and device at once,
+so `KBD_USB` turns `pico_enable_stdio_usb` off and CMake **refuses**
+`-DKBD_USB=ON -DUSB_LOG=ON` outright rather than silently dropping the log.
+Use `-DSD_LOG=ON` for diagnostics in that configuration.
+
+The driver translates HID usages into **XT set-1 scancodes** and calls
+`handleScancode()`, rather than feeding HID in directly. That function is not a
+keymap: it also implements the joystick emulation on QWE/ASD/ZXC and the keypad,
+the Alt+letter UI shortcuts, Ctrl/Shift+Fn save states and Ctrl+Alt+Del.
+Translating reuses all of it; a second input path would duplicate that behaviour
+and drift from it. PS/2 stays linked, so both keyboards work at once — they just
+feed the same function.
+
+Two things to know before editing the table in
+[usbkbd.c](drivers/usbkbd/usbkbd.c):
+
+- **Arrows map to the keypad codes, not the extended ones.** `handleScancode()`
+  decodes `0xE0` only for right Ctrl and right Alt, and already treats
+  `0x48`/`0x4B`/`0x4D`/`0x50` as both the arrows and joystick 1. Emitting
+  `0xE048` and friends would make the arrows dead keys. HID Delete maps to
+  `0x53` (keypad `.`) for the same reason — that is what Ctrl+Alt+Del expects.
+- **The table uses designated initializers deliberately.** C cannot
+  `_Static_assert` on array contents, and in a 104-entry positional list one
+  stray element shifts everything after it invisibly. Explicit indices are the
+  check. If you do change it, the compiled table can be read back with
+  `arm-none-eabi-objdump -s --start-address=<hid_to_xt>` and compared by hand.
+
+Note that [drivers/ps2kbd/](drivers/ps2kbd/) is **not** this: it is the reverse
+direction, a PS/2 keyboard read over PIO that synthesises HID reports, which is
+how pico-spec unifies its two input sources. It remains unused here.
 
 ### "PSRAM" is an SRAM array on this board
 
@@ -267,8 +308,9 @@ Pin assignments are **not** in the source — they are all `target_compile_defin
 Note the legacy naming: the microSD defines still say `SPI0` while `SDCARD_SPI_BUS` is `spi1`.
 
 Note that `drivers/` contains more backends than are built: only `ps2`, `fatfs`, `sdcard`, `nespad`,
-`psram-sram`, `graphics` and the selected display driver are added as subdirectories. `psram/` (the PIO
-PSRAM driver), `ps2kbd/`, `audio/`, `usb/`, `usbfs/`, `ws2812/` are present but unused.
+`psram-sram`, `graphics`, the selected display driver and — with `-DKBD_USB=ON` — `usbkbd` are added as
+subdirectories. `psram/` (the PIO PSRAM driver), `ps2kbd/`, `audio/`, `usb/`, `usbfs/`, `ws2812/` are
+present but unused.
 
 ## Board facts
 
@@ -316,9 +358,10 @@ Three consequences worth knowing before touching video:
   `PICO_ERROR_BAD_ALIGNMENT` when a pin config does not fit the window - it is now checked and printed
   along with the SM's `pinctrl`, since silently ignoring it hides exactly this class of fault.
 
-**Input is unfinished.** The `KBD_*`, `NES_*` and audio pins in [CMakeLists.txt](CMakeLists.txt) are
-copied from pico-spec's ZERO2 target rather than guessed, so they match what that firmware expects on this
-board — but this port's PS/2 and NES code has not been run against real wiring here. `WII_SDA_PIN` /
+**Input is half finished.** The USB keyboard works (see above). The `KBD_*`, `NES_*` and audio pins in
+[CMakeLists.txt](CMakeLists.txt) are copied from pico-spec's ZERO2 target rather than guessed, so they
+match what that firmware expects on this board — but this port's PS/2 and NES code has not been run against
+real wiring here, and a build without a PS/2 keyboard attached logs a harmless `KBD error 01` at boot. `WII_SDA_PIN` /
 `WII_SCL_PIN` are parked on free I2C1 pins purely because `util_Wii_Joy.c` dereferences them
 unconditionally; `USE_WII` is not defined and `init_wii()` is never called. Treat the key map below as
 inherited from the Murmulator build.

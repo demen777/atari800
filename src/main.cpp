@@ -28,6 +28,9 @@ extern "C" {
 #include "input.h"
 #include "statesav.h"
 #include "util_Wii_Joy.h"
+#ifdef KBD_USB
+#include "usbkbd.h"
+#endif
 }
 
 static FATFS fs;
@@ -820,6 +823,11 @@ int main() {
     init_psram();
     printf("init_psram done\n");
 
+#ifdef KBD_USB
+    usbkbd_init();
+    printf("usbkbd_init done (native USB host; no CDC on this build)\n");
+#endif
+
     /* Start the display before the emulator: it depends only on the static
        __screen buffer, and bringing it up first means a failure further down
        shows as a black screen on a live link instead of no signal at all. */
@@ -879,6 +887,9 @@ int main() {
 	        }
         }
         snd_channels = libatari800_get_num_sound_channels();
+#endif
+#ifdef KBD_USB
+        usbkbd_task();
 #endif
         libatari800_next_frame(&input_map);
         {
