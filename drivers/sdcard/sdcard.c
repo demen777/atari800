@@ -378,6 +378,9 @@ BYTE send_cmd (		/* Return value: R1 resp (bit7==1:Failed to send) */
 /* Initialize disk drive                                                 */
 /*-----------------------------------------------------------------------*/
 
+/* defined further down, used by the self-check in disk_initialize */
+static uint16_t crc16_sd(const BYTE *buf, int len);
+
 DSTATUS disk_initialize (
 	BYTE drv		/* Physical drive number (0) */
 )
@@ -404,6 +407,13 @@ DSTATUS disk_initialize (
 		static const BYTE c8[5] = { 0x48, 0x00, 0x00, 0x01, 0xAA };
 		SDLOG("sd: crc7 self-check CMD0=%02x (want 95) CMD8=%02x (want 87)\n",
 			      crc7_sd(c0, 5), crc7_sd(c8, 5));
+		{
+			static const BYTE v9[9] = { '1','2','3','4','5','6','7','8','9' };
+			static BYTE zero[16];
+			SDLOG("sd: crc16 self-check \"123456789\"=%04x (want 31c3)\n",
+				      crc16_sd(v9, 9));
+			(void) zero;
+		}
 	}
 	/* The SD spec wants >=74 clocks with CS HIGH before the first command; driving
 	   them with CS asserted (as this driver did) lets a card mis-frame the
@@ -566,6 +576,31 @@ void xmit_spi_multi (
 /* Transmit a data packet to the MMC                                     */
 /*-----------------------------------------------------------------------*/
 
+/* SD data-block CRC16, polynomial x^16 + x^12 + x^5 + 1 (CRC-16/XMODEM:
+ * init 0, no reflection, no final xor).
+ *
+ * Same story as the command CRC7: this card enforces the CRC, and
+ * xmit_datablock() used to send a dummy 0xFFFF, so every write was refused
+ * at the data-response token while reads worked fine. The symptom was
+ * f_open succeeding and f_write returning FR_DISK_ERR with 0 bytes written.
+ *
+ * Checked against the standard XMODEM vector before use: "123456789" must
+ * give 0x31C3. Two handy block vectors: 512 zero bytes give 0x0000 and 512
+ * 0xFF bytes give 0x7FA1.
+ */
+static uint16_t crc16_sd(const BYTE *buf, int len)
+{
+	uint16_t crc = 0;
+	int i, j;
+	for (i = 0; i < len; i++) {
+		crc ^= (uint16_t)buf[i] << 8;
+		for (j = 0; j < 8; j++)
+			crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+				                     : (uint16_t)(crc << 1);
+	}
+	return crc;
+}
+
 static
 int xmit_datablock (	/* 1:OK, 0:Error */
 	const BYTE *buff, /* 512 byte data block to be transmitted */
@@ -577,11 +612,19 @@ int xmit_datablock (	/* 1:OK, 0:Error */
 	xchg_spi(token); /* Xmit data token */
 	if (token != 0xFD) { /* Is data token */
 		xmit_spi_multi(buff, 512); /* Xmit the data block to the MMC */
-		xchg_spi(0xFF); /* CRC (Dummy) */
-		xchg_spi(0xFF);
+		{	/* real CRC16 - a dummy is refused by cards that check it */
+			uint16_t crc = crc16_sd(buff, 512);
+			xchg_spi((BYTE)(crc >> 8));
+			xchg_spi((BYTE)crc);
+		}
 		resp = xchg_spi(0xFF); /* Reveive data response */
 		if ((resp & 0x1F) != 0x05) /* If not accepted, return with error */
-			return 0;
+			{
+				SDLOG("sd: data block REJECTED, resp=%02x (%s)\n", resp,
+				      (resp & 0x1f) == 0x0b ? "CRC error" :
+				      (resp & 0x1f) == 0x0d ? "write error" : "unknown");
+				return 0;
+			}
 	}
 	return 1;
 }
