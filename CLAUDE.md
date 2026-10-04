@@ -98,8 +98,17 @@ the UI call chain is full of `FILENAME_MAX` (1024-byte) stack buffers —
 plus whatever the caller in [ui.c](src/ui.c) holds — so opening the file
 selector adds roughly 8–10 KB on top of the ~11.5 KB the emulator loop uses.
 Overflowing runs straight into the heap, which is where `Util_malloc` is
-building the very filename list being scanned. Core 1 keeps SCRATCH_X (4 KB,
-`PICO_CORE1_STACK_SIZE`), SCRATCH_Y is now entirely unused, and the heap still has ~210 KB.
+building the very filename list being scanned — so it corrupts the data it is
+walking rather than faulting, and presents as a hang inside the file selector
+with no other symptom. Confirmed on hardware: at 32 KB the selector hung, at
+64 KB it works. Core 1 keeps SCRATCH_X (4 KB, `PICO_CORE1_STACK_SIZE`),
+SCRATCH_Y is entirely unused, and the heap still has ~180 KB.
+
+**Measure before shrinking this.** A release build prints nothing, but
+`-DSD_LOG=ON` (or `-DUSB_LOG=ON` on a non-`KBD_USB` build) reports
+`stack: NNNNN of 65536 bytes used` every five seconds, from a pattern painted
+over the stack at boot. The emulator loop alone sits around 11.5 KB; the UI is
+what needs the rest.
 
 The HDMI driver's data and handler also moved from `__scratch_y` to `__not_in_flash`/`__not_in_flash_func`,
 which keeps them in RAM — the real point of `__scratch_y` — without sharing a bank with any stack. Do not
@@ -383,7 +392,8 @@ Three consequences worth knowing before touching video:
   `PICO_ERROR_BAD_ALIGNMENT` when a pin config does not fit the window - it is now checked and printed
   along with the SM's `pinctrl`, since silently ignoring it hides exactly this class of fault.
 
-**Input is half finished.** The USB keyboard works (see above). The `KBD_*`, `NES_*` and audio pins in
+**Input: USB works, PS/2 and NES are unverified.** The USB keyboard is confirmed end to end on hardware —
+typing, F1 into the menu, menu navigation and the disk file selector. The `KBD_*`, `NES_*` and audio pins in
 [CMakeLists.txt](CMakeLists.txt) are copied from pico-spec's ZERO2 target rather than guessed, so they
 match what that firmware expects on this board — but this port's PS/2 and NES code has not been run against
 real wiring here, and a build without a PS/2 keyboard attached logs a harmless `KBD error 01` at boot. `WII_SDA_PIN` /
@@ -393,7 +403,8 @@ inherited from the Murmulator build.
 
 ## Device key map
 
-Inherited from the Murmulator build; unverified on this board (see *Board facts*).
+Inherited from the Murmulator build. The USB keyboard path is verified on this board; the PS/2 and NES
+pins are not (see *Board facts*).
 
 F1 UI · F2 Option · F3 Select · F4 Start · F5 Help · Ctrl+Alt+Del cold restart · Ctrl+Fn save state ·
 Shift+Fn load state · F12 at boot → USB firmware update mode.
