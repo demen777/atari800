@@ -4365,10 +4365,19 @@ static void Screenshot(int interlaced)
 
 #endif /* !defined(CURSES_BASIC) && !defined(DREAMCAST) */
 
+/* Build date, time and commit; also what `picotool info` reports as the version. */
+#include "build_stamp.h"
+#include "pico/binary_info.h"
+bi_decl(bi_program_version_string(BUILD_STAMP));
+
 static void AboutEmulator(void)
 {
 	UI_driver->fInfoScreen("About the Emulator",
 		Atari800_TITLE "\0"
+		"RP2350-PiZero port\0"
+		"Build " BUILD_STAMP "\0"
+		"https://github.com/demen777/atari800\0"
+		"\0"
 		"Copyright (c) 1995-1998 David Firth\0"
 		"and\0"
 		"(c)1998-2023 Atari800 Development Team\0"

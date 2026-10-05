@@ -90,7 +90,20 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/s
 pico_add_linker_script_override_path(${PROJECT_NAME} ${CMAKE_CURRENT_SOURCE_DIR}/linker_overrides GLOB_FILES)
 
 pico_set_program_name(${PROJECT_NAME} "pico-atari")
-pico_set_program_version(${PROJECT_NAME} "test")
+
+# The firmware's version is when it was built and from which commit. The header
+# is rewritten on every build, not just at configure time, so the stamp cannot
+# go stale; only ui.c includes it, so that is all that recompiles. It shows on
+# the About screen (F1 -> About the Emulator) and in `picotool info`.
+add_custom_target(build_stamp ALL
+        COMMAND ${CMAKE_COMMAND}
+                -DOUT=${CMAKE_BINARY_DIR}/generated/build_stamp.h
+                -DSRC=${CMAKE_SOURCE_DIR}
+                -P ${CMAKE_SOURCE_DIR}/build_stamp.cmake
+        BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/build_stamp.h
+        VERBATIM)
+add_dependencies(${PROJECT_NAME} build_stamp)
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_BINARY_DIR}/generated)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
         ps2

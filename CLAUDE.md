@@ -67,6 +67,13 @@ which drops HDMI audio and puts a plain DVI signal on the connector (see *HDMI a
 default and the OFF image gets a `-noaudio` suffix. The sixth is `-DPWM_AUDIO=ON`, which adds the PWM
 sound output back to a build that has HDMI audio.
 
+**Every image is stamped with its build time and commit.** A `build_stamp` target runs
+[build_stamp.cmake](build_stamp.cmake) on every build (not only at configure time) and writes
+`generated/build_stamp.h` with `BUILD_STAMP`, e.g. `2026-10-05 20:44 bbeb91e9+` — the `+` means
+uncommitted changes. Only [ui.c](src/ui.c) includes it, so each build recompiles that one file and
+relinks. It is shown under F1 → About the Emulator and is what `picotool info` prints as the version;
+the file name deliberately does not carry it.
+
 **There are no tests.** `configure.ac`, `Makefile.am`, `autogen.sh`, `.travis*`, `atari800.spec`, `debian/`,
 `src/libatari800/libatari800_test.c` and `tools/` are upstream autotools leftovers — not wired into the
 CMake build and not maintained here. CMake globs `src/*.c` and `src/*.cpp` recursively, so adding a source
