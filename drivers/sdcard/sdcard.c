@@ -14,6 +14,13 @@
 #include "ff.h"
 #include "diskio.h"
 
+#ifdef FRAME_DIAG
+/* The real functions are compiled under other names and wrapped at the end of
+   this file, so every card access is timed without touching their bodies. */
+#define disk_read disk_read_untimed
+#define disk_write disk_write_untimed
+#endif
+
 #ifdef USB_LOG
 /* Declared by hand rather than via <stdio.h>: ff.h above defines its own
    fopen/fread/fwrite with different signatures and the two collide. */
@@ -753,3 +760,25 @@ DRESULT disk_ioctl (
 
 	return res;
 }
+
+#ifdef FRAME_DIAG
+#undef disk_read
+#undef disk_write
+extern volatile uint32_t frame_diag_sd_us, frame_diag_sd_calls;
+
+DRESULT disk_read(BYTE drv, BYTE *buff, LBA_t sector, UINT count) {
+	const uint32_t t = time_us_32();
+	const DRESULT res = disk_read_untimed(drv, buff, sector, count);
+	frame_diag_sd_us += time_us_32() - t;
+	frame_diag_sd_calls++;
+	return res;
+}
+
+DRESULT disk_write(BYTE drv, const BYTE *buff, LBA_t sector, UINT count) {
+	const uint32_t t = time_us_32();
+	const DRESULT res = disk_write_untimed(drv, buff, sector, count);
+	frame_diag_sd_us += time_us_32() - t;
+	frame_diag_sd_calls++;
+	return res;
+}
+#endif

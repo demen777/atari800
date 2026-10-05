@@ -89,7 +89,7 @@ enum { CRC_NULL = 0 };
 SYSROM_t SYSROM_roms[SYSROM_SIZE] = {
 	{ osa_ntsc_filename, 0x2800, 0xc1b3bb02, NULL, TRUE }, /* SYSROM_A_NTSC */
 	{ osa_pal_filename, 0x2800, 0x72b3fed4, NULL, TRUE }, /* SYSROM_A_PAL */
-	{ osb_ntsc_filename, 0x2800, 0x0e86d61d, MEMORY_os, FALSE }, /* SYSROM_B_NTSC */
+	{ osb_ntsc_filename, 0x2800, 0x0e86d61d, ATARIOSB_ROM, FALSE }, /* SYSROM_B_NTSC */
 	{ osaa00r10_filename, 0x4000, 0xc5c11546, NULL, TRUE }, /* SYSROM_AA00R10 */
 	{ osaa01r11_filename, 0x4000, 0x1a1d7b1b, NULL, TRUE }, /* SYSROM_AA01R11 */
 	{ osbb00r1_filename, 0x4000, 0x643bcc98, NULL, TRUE }, /* SYSROM_BB00R1 */
@@ -521,6 +521,24 @@ void SYSROM_ChooseROMs(int machine_type, int ram_size, int tv_system, int *os_ve
 	}
 	printf("SYSROM_ChooseROMs(%d, %d, %d) os_version: %d, basic_version: %d, xegame_version: %d",
 	        machine_type, ram_size, tv_system, *os_version, *basic_version, *xegame_version);
+}
+
+int SYSROM_SelectOS(int id)
+{
+	/* Only a ROM read from the card needs RAM, and then only one at a time. */
+	static UBYTE *file_os = NULL;
+
+	printf("SYSROM_SelectOS(id: %d)", id);
+	if (SYSROM_roms[id].data != NULL) {
+		MEMORY_os = SYSROM_roms[id].data;
+		return TRUE;
+	}
+	if (file_os == NULL)
+		file_os = (UBYTE *) Util_malloc(0x4000, "SYSROM_SelectOS");
+	if (!Atari800_LoadImage(SYSROM_roms[id].filename, file_os, SYSROM_roms[id].size))
+		return FALSE;
+	MEMORY_os = file_os;
+	return TRUE;
 }
 
 int SYSROM_LoadImage(int id, UBYTE *buffer)

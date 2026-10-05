@@ -166,7 +166,8 @@ static int mz_quality = 0;		/* default quality for mzpokeysnd */
 int mz_clear_regs = 0;
 #endif
 
-#ifndef __MINT__
+#if 0 /* MZ POKEY does its resampling in doubles; on RP2350 that took emulation
+         down to 55% under four-voice music. Still selectable in the UI. */
 int POKEYSND_enable_new_pokey = TRUE;
 #else
 /* too slow on Falcon */

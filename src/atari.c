@@ -88,6 +88,7 @@
 #include "sio.h"
 #include "sysrom.h"
 #include "util.h"
+#include "frame_diag.h"
 #if !defined(BASIC) && !defined(CURSES_BASIC)
 #include "colours.h"
 #include "screen.h"
@@ -305,14 +306,10 @@ static int load_roms(void)
 	printf("[load_roms]");
 	int basic_ver, xegame_ver;
 	SYSROM_ChooseROMs(Atari800_machine_type, MEMORY_ram_size, Atari800_tv_mode, &Atari800_os_version, &basic_ver, &xegame_ver);
-	if (Atari800_os_version == -1 || !SYSROM_LoadImage(Atari800_os_version, MEMORY_os)) {
+	if (Atari800_os_version == -1 || !SYSROM_SelectOS(Atari800_os_version)) {
 		printf("[load_roms] NO OS ROM");
 		/* Missing OS ROM. */
 		Atari800_os_version = -1;
-		/* Avoid MEMORY_os containing old OS when the user explicitly removed
-		   all system ROMs from settings. */
-		if (MEMORY_os >= 0x20000000) // it is RAM
-			memset(MEMORY_os, 0, sizeof(MEMORY_os));
 		return FALSE;
 	}
 	else if (Atari800_machine_type != Atari800_MACHINE_5200) {
@@ -341,6 +338,16 @@ static int load_roms(void)
 int Atari800_InitialiseMachine(void)
 {
 	int have_roms;
+	/* A config file can pair a machine with a RAM size it never had (a
+	   400/800 stops at 52 KB, a 5200 has 16). Settle it here, where every
+	   path into a new machine passes. */
+	if (Atari800_machine_type == Atari800_MACHINE_800 && MEMORY_ram_size > 52)
+		MEMORY_ram_size = 48;
+	else if (Atari800_machine_type == Atari800_MACHINE_5200)
+		MEMORY_ram_size = 16;
+	else if (Atari800_machine_type == Atari800_MACHINE_XLXE
+	         && MEMORY_ram_size != 16 && MEMORY_ram_size != 32 && MEMORY_ram_size != 48 && MEMORY_ram_size < 64)
+		MEMORY_ram_size = 64;
 	ESC_ClearAll();
 	have_roms = load_roms();
 	Atari800_UpdateKeyboardDetached();
@@ -1301,11 +1308,13 @@ void Atari800_Frame(void)
 #if defined(PBI_XLD) || defined (VOICEBOX)
 	VOTRAXSND_Frame(); /* for the Votrax */
 #endif
+	frame_diag_mark(FRAME_DIAG_PRE);
 	Devices_Frame();
 #ifndef BASIC
 	INPUT_Frame();
 #endif
 	GTIA_Frame();
+	frame_diag_mark(FRAME_DIAG_ANTIC);
 
 #ifdef BASIC
 	basic_frame();
@@ -1339,13 +1348,16 @@ void Atari800_Frame(void)
 		Atari800_display_screen = FALSE;
 	}
 #endif /* BASIC */
+	frame_diag_mark(FRAME_DIAG_POKEY);
 	POKEY_Frame();
 #ifdef VIDEO_RECORDING
 	File_Export_WriteVideo();
 #endif
+	frame_diag_mark(FRAME_DIAG_SOUND);
 #ifdef SOUND
 	Sound_Update();
 #endif
+	frame_diag_work_done();
 #if defined(AUDIO_RECORDING) || defined(VIDEO_RECORDING)
 	/* multimedia stats are drawn here so they don't get recorded in the video */
 	Screen_DrawMultimediaStats();
@@ -1366,6 +1378,7 @@ void Atari800_Frame(void)
 		else
 			while (time_us_64() * 1000 < frame_deadline_ns);
     }
+	frame_diag_wait_done();
 #ifndef LIBATARI800
 #ifdef BENCHMARK
 	if (Atari800_nframes >= BENCHMARK) {

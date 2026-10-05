@@ -58,13 +58,14 @@ for a CDC connection that can never happen, so the board looks completely dead w
 `tusb_*`. If USB diagnostics ever go silent again, check this first: `_Static_assert(CFG_TUD_CDC == 1)`
 in any TU settles it in one build.
 
-Five build knobs: `-DUSB_LOG=ON` turns `printf`/`Log_print` into real output on the USB CDC port,
+Six build knobs: `-DUSB_LOG=ON` turns `printf`/`Log_print` into real output on the USB CDC port,
 `-DSD_LOG=ON` appends to `tari.log` on the card (`MNGR_DEBUG`), and `-DSYS_CLOCK_KHZ=` overrides the
 clock for testing — note that anything other than 252000 skews DVI timing. Both logs only start once
 execution reaches them, so neither helps with a hang before `stdio_init_all()`. The fourth is `-DKBD_USB=ON`
 for the USB keyboard, which is incompatible with `USB_LOG` (see below). The fifth is `-DHDMI_AUDIO=OFF`,
 which drops HDMI audio and puts a plain DVI signal on the connector (see *HDMI audio*); it is ON by
-default and the OFF image gets a `-noaudio` suffix.
+default and the OFF image gets a `-noaudio` suffix. The sixth is `-DPWM_AUDIO=ON`, which adds the PWM
+sound output back to a build that has HDMI audio.
 
 **There are no tests.** `configure.ac`, `Makefile.am`, `autogen.sh`, `.travis*`, `atari800.spec`, `debian/`,
 `src/libatari800/libatari800_test.c` and `tools/` are upstream autotools leftovers — not wired into the
@@ -73,8 +74,8 @@ file needs no CMakeLists edit (but does need a re-configure).
 
 **RAM used to be the binding constraint and no longer is.** On RP2040 it was a 256 KB budget run at ~87%
 full, and commit messages in `git log` are literally recorded RAM percentages
-(e.g. `RAM: 228640 B / 256 KB 87.22%`). RP2350B has 512 KB and the current build sits at **363 792 B
-(69.39%)**, flash at 3.58% of 16 MB (290 812 B with `-DHDMI_AUDIO=OFF`; the difference is the audio
+(e.g. `RAM: 228640 B / 256 KB 87.22%`). RP2350B has 512 KB and the current build sits at **363 760 B
+(69.38%)**, flash at 3.58% of 16 MB (290 812 B with `-DHDMI_AUDIO=OFF`; the difference is the audio
 queues). The link still prints `--print-memory-usage`, but there is now
 headroom to move banked memory *into* SRAM rather than out of it.
 
@@ -134,10 +135,25 @@ stack at boot and prints a high-water figure, so the real requirement is measura
   tick (TFT only; VGA/HDMI/TV scan out via PIO+DMA autonomously), and polls the NES pads every 5th frame.
   Started via `multicore_launch_core1` and gated by `vga_start_semaphore`; it calls
   `multicore_lockout_victim_init()` so flash writes can stall it.
-- **Sound** — a `repeating_timer` at the POKEY sample rate (`snd_timer_callback`) walks the buffer that
-  `PLATFORM_SoundWrite` captured from the core and pushes samples to PWM pins. The timer is re-armed from
-  the main loop whenever `libatari800_get_sound_frequency()` changes. The same `PLATFORM_SoundWrite` also
-  feeds HDMI audio, which runs alongside PWM rather than replacing it (see *HDMI audio*).
+- **Sound** — HDMI audio in the default build (see *HDMI audio*). The older PWM output is a
+  `repeating_timer` at the POKEY sample rate (`snd_timer_callback`) that walks the buffer
+  `PLATFORM_SoundWrite` captured and pushes samples to the PWM pins — tens of thousands of interrupts a
+  second on the emulator's core. It is therefore compiled in only with `-DPWM_AUDIO=ON` (image suffix
+  `-pwm`) or automatically in any build that has no HDMI audio (`-DHDMI_AUDIO=OFF`, TFT, VGA, TV).
+
+**High Fidelity POKEY is off by default, for speed.** `ENABLE_NEW_POKEY=1` selects MZ POKEY
+([mzpokeysnd.c](src/mzpokeysnd.c)), which resamples in doubles and scales with how busy the sound
+channels are: measured on hardware, International Karate's music took emulation down to 55%, and with it
+off the same scene holds 90-100%. Slow emulation also means silence, because the emulator then produces
+fewer samples than HDMI consumes. Both the compiled-in default ([pokeysnd.c](src/pokeysnd.c)) and
+[data/atari800.cfg](data/atari800.cfg) are 0 now; it remains selectable under F1 → Sound Settings. A card
+seeded earlier still carries its own `ENABLE_NEW_POKEY` line, and that wins.
+
+**Moving the emulator's inner loop into RAM was tried and did not help.** `cpu.c`, `antic.c`, `gtia.c`,
+`pokey.c`, `pokeysnd.c` and `pia.c` (about 50 KB) were added to the exclude lists in
+[linker_overrides/](linker_overrides/) on the theory that they thrash the 16 KB XIP cache. On hardware
+the dips in International Karate were no rarer, and it cost 32 KB of heap, so it was reverted. Whatever
+causes the remaining dips, it is not XIP misses in those modules.
 
 ### Zero-copy video
 
@@ -341,6 +357,27 @@ APS6404 onto the pad, that is *not* the thing to reach for — RP2350 addresses 
 Note that `statesav.c` calls `write8psram`/`read8psram` without including any header, relying on implicit
 declaration. That predates the retarget and keeps working only because `-w` and
 `-Wno-error=implicit-function-declaration` are set.
+
+### The OS ROM is selected, not baked in
+
+`MEMORY_os` is a pointer that `SYSROM_SelectOS()` ([sysrom.c](src/sysrom.c)) aims at the chosen image: a
+built-in array in flash, or a 16 KB heap copy when the ROM comes from a file on the card. It used to *be*
+the OS-B array (`const ... MEMORY_os[16384]` in flash), with `SYSROM_LoadImage()` returning success
+without copying anything for a flash destination — so every machine type ran the 400/800 OS and XL/XE
+never booted. Two more things hid behind that: the built-in XL OS in
+[ATARIXL_ROM.h](src/roms/ATARIXL_ROM.h) was declared `[8192]` around 16384 initialisers, silently
+truncated because `-w` hides the warning, and `main()` passed `-atari`, which forced 400/800 at boot
+whatever the config said. That argument is gone: the machine comes from `MACHINE_TYPE` / `RAM_SIZE` in
+`atari800.cfg`, and with no card it is the emulator's default, XL/XE 64 KB. BASIC is still fixed to the
+built-in revision C (`MEMORY_basic`, same flash-destination shortcut). XL/XE 64 KB is confirmed on
+hardware: International Karate, which jams at the end of a match on a 48 KB 400/800, plays through.
+
+`RAM_SIZE` is read from the config again, up to 128 KB (larger sizes would not fit the heap). The port had
+that branch commented out, which only stayed hidden while `-atari` set 48 KB by hand: without it a
+400/800 from the config kept the default 64 KB, and the System Settings menu hung, because upstream's
+`FindMenuItem()` walks its array until it finds the value and 64 is not on the 400/800 list.
+`Atari800_InitialiseMachine()` now corrects impossible machine/RAM pairs and `FindMenuItem()` stops at
+the end of the menu.
 
 ### SD card: this card checks CRCs, both of them
 

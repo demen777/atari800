@@ -758,11 +758,13 @@ static UINT sound_array_fill = 0;
 extern "C" UBYTE *LIBATARI800_Sound_array = 0;
 extern "C" void PLATFORM_SoundWrite(UBYTE const *buffer, unsigned int size)
 {
+#if PWM_AUDIO
     if (LIBATARI800_Sound_array) free(LIBATARI800_Sound_array);
     LIBATARI800_Sound_array = (UBYTE *) Util_malloc(size, "PLATFORM_SoundWrite");
 	memcpy(LIBATARI800_Sound_array, buffer, size);
 	sound_array_idx = 0;
 	sound_array_fill = size;
+#endif
 #if defined(HDMI) && HDMI_AUDIO
     /* POKEY output is unsigned 8-bit, interleaved when there are two chips. */
     hdmi_audio_write_u8(buffer, size / Sound_out.channels, Sound_out.channels);
@@ -770,8 +772,13 @@ extern "C" void PLATFORM_SoundWrite(UBYTE const *buffer, unsigned int size)
 }
 
 #ifdef SOUND
-static repeating_timer_t timer;
 static int snd_channels = 2;
+#endif
+/* PWM sound is a timer interrupt on the emulator's core at the sample rate -
+   tens of thousands a second - so it is only built when asked for
+   (-DPWM_AUDIO=ON) or when there is no HDMI audio to carry the sound. */
+#if defined(SOUND) && PWM_AUDIO
+static repeating_timer_t timer;
 static bool __not_in_flash_func(snd_timer_callback)(repeating_timer_t *rt) {
     static uint16_t outL = 0;  
     static uint16_t outR = 0;
@@ -865,9 +872,11 @@ int main() {
     sem_release(&vga_start_semaphore);
     printf("core1/graphics started\n");
 
-    /* force the 400/800 OS to get the Memo Pad */
+    /* No arguments: the machine type comes from MACHINE_TYPE / RAM_SIZE in
+       atari800.cfg, and without a card it is the emulator's own default,
+       XL/XE with 64 KB. This used to pass "-atari", which forced a 400/800
+       over whatever the config said. */
     char *test_args[] = {
-        "-atari",
         NULL,
     };
     printf("libatari800_init\n");
@@ -887,7 +896,7 @@ int main() {
 #endif
 
     PWM_init_pin(BEEPER_PIN, (1 << 8) - 1);
-#ifdef SOUND
+#if defined(SOUND) && PWM_AUDIO
     PWM_init_pin(PWM_PIN0, (1 << 8) - 1);
     PWM_init_pin(PWM_PIN1, (1 << 8) - 1);
 #endif
@@ -899,10 +908,12 @@ int main() {
 #ifdef SOUND
     int hz = libatari800_get_sound_frequency();
     snd_channels = libatari800_get_num_sound_channels();
+#if PWM_AUDIO
     // negative timeout means exact delay (rather than delay between callbacks)
     if (!add_repeating_timer_us(-1000000 / hz, snd_timer_callback, NULL, &timer)) {
         printf("Failed to add timer");
     }
+#endif
 #if defined(HDMI) && HDMI_AUDIO
     if (!hdmi_audio_set_sample_rate(hz)) {
         printf("HDMI audio muted: %d Hz is not 32000, 44100 or 48000\n", hz);
@@ -914,11 +925,13 @@ int main() {
 #ifdef SOUND
         int hz_new = libatari800_get_sound_frequency();
         if (hz_new != hz) {
-            cancel_repeating_timer(&timer);
             hz = hz_new;
+#if PWM_AUDIO
+            cancel_repeating_timer(&timer);
             if (!add_repeating_timer_us(-1000000 / hz, snd_timer_callback, NULL, &timer)) {
 		        printf("Failed to update timer");
 	        }
+#endif
 #if defined(HDMI) && HDMI_AUDIO
             if (!hdmi_audio_set_sample_rate(hz)) {
                 printf("HDMI audio muted: %d Hz is not 32000, 44100 or 48000\n", hz);

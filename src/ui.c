@@ -186,8 +186,13 @@ int UI_n_saved_files_dir = 0;
 
 static UI_tMenuItem *FindMenuItem(UI_tMenuItem *mip, int option)
 {
-	while (mip->retval != option)
+	UI_tMenuItem *first = mip;
+	while (mip->retval != option) {
+		/* A value that is not on the menu must not walk off its end. */
+		if (mip->flags == UI_ITEM_END)
+			return first;
 		mip++;
+	}
 	return mip;
 }
 

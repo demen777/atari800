@@ -266,7 +266,13 @@ uint32_t ps2getcode() {
     return retval;
 }
 
+#ifdef FRAME_DIAG
+extern volatile uint32_t frame_diag_ps2_irqs;
+#endif
 void KeyboardHandler(void) {
+#ifdef FRAME_DIAG
+    frame_diag_ps2_irqs++;
+#endif
     static uint8_t incoming = 0;
     static uint32_t prev_ms = 0;
     uint32_t now_ms;

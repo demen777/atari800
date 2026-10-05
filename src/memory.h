@@ -97,8 +97,13 @@ void MEMORY_ROM_PutByte(UWORD addr, UBYTE byte);
 #include <pico/platform.h>
 
 extern const unsigned char __in_flash() __aligned(4096) MEMORY_basic[8192];
-extern const unsigned char __in_flash() __aligned(4096) MEMORY_os[16384]; // OS_B
-extern const unsigned char __in_flash() __aligned(4096) ATARIXL_ROM[8192];
+/* The OS ROM in use. It used to be the OS-B array itself, so whatever machine
+   was selected ran the 400/800 OS and XL/XE never booted. Now it points at
+   the image SYSROM_SelectOS() chose: a built-in one in flash, or a heap copy
+   of a ROM file from the card. */
+extern const unsigned char *MEMORY_os;
+extern const unsigned char __in_flash() __aligned(4096) ATARIOSB_ROM[16384]; // OS_B, 10 KB used
+extern const unsigned char __in_flash() __aligned(4096) ATARIXL_ROM[16384];
 extern const unsigned char __in_flash() __aligned(4096) MEMORY_xegame[8192]; // TBA
 ///extern UBYTE MEMORY_basic[8192];
 ///extern UBYTE MEMORY_os[16384];

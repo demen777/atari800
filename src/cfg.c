@@ -180,17 +180,16 @@ int CFG_LoadConfig(const char *alternate_config_filename) {
 					Log_print("Invalid machine type: %s", ptr);
 			}
 			else if (strcmp(string, "RAM_SIZE") == 0) {
-		/**		if (strcmp(ptr, "320 (RAMBO)") == 0)
-					MEMORY_ram_size = MEMORY_RAM_320_RAMBO;
-				else if (strcmp(ptr, "320 (COMPY SHOP)") == 0)
-					MEMORY_ram_size = MEMORY_RAM_320_COMPY_SHOP;
-				else {
-					int size = Util_sscandec(ptr);
-					if (MEMORY_SizeValid(size))
-						MEMORY_ram_size = size;
-					else
-						Log_print("Invalid RAM size: %s", ptr);
-				}*/
+				/* Sizes above 128 KB are refused rather than read: the extended
+				   banks come out of a heap of under 100 KB, and 128 KB already
+				   takes 64 KB of it. (This whole branch used to be commented
+				   out, which left a 400/800 from the config with the default
+				   64 KB - a combination the System Settings menu cannot show.) */
+				int size = Util_sscandec(ptr);
+				if (MEMORY_SizeValid(size) && size <= 128)
+					MEMORY_ram_size = size;
+				else
+					Log_print("Invalid or unsupported RAM size: %s", ptr);
 			}
 			else if (strcmp(string, "DEFAULT_TV_MODE") == 0) {
 				if (strcmp(ptr, "PAL") == 0)

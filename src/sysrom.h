@@ -144,6 +144,9 @@ void SYSROM_ChooseROMs(int machine_type, int ram_size, int tv_system, int *os_ve
    a memory buffer BUFFER. */
 int SYSROM_LoadImage(int id, UBYTE *buffer);
 
+/* Makes MEMORY_os the OS image with this ID. Returns FALSE if it cannot be had. */
+int SYSROM_SelectOS(int id);
+
 /* Read/write from/to configuration file. */
 int SYSROM_ReadConfig(char *string, char *ptr);
 void SYSROM_WriteConfig(FIL *fp);
