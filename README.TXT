@@ -1,3 +1,5 @@
+AI adaptation https://github.com/DnCraptor/atari800 for Waveshare RP2350-PiZero with USB keyboard and video+sound over DVI
+
 Atari emulator for the Waveshare RP2350-PiZero board
 (RP2350B, Arm Cortex-M33, 520K SRAM, 16M flash, on-board DVI and microSD).
 
