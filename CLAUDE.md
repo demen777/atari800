@@ -74,8 +74,8 @@ file needs no CMakeLists edit (but does need a re-configure).
 
 **RAM used to be the binding constraint and no longer is.** On RP2040 it was a 256 KB budget run at ~87%
 full, and commit messages in `git log` are literally recorded RAM percentages
-(e.g. `RAM: 228640 B / 256 KB 87.22%`). RP2350B has 512 KB and the current build sits at **363 760 B
-(69.38%)**, flash at 3.58% of 16 MB (290 812 B with `-DHDMI_AUDIO=OFF`; the difference is the audio
+(e.g. `RAM: 228640 B / 256 KB 87.22%`). RP2350B has 512 KB and the current build sits at **379 892 B
+(72.46%)**, flash at 3.58% of 16 MB (290 812 B with `-DHDMI_AUDIO=OFF`; the difference is the audio
 queues). The link still prints `--print-memory-usage`, but there is now
 headroom to move banked memory *into* SRAM rather than out of it.
 
@@ -148,6 +148,12 @@ off the same scene holds 90-100%. Slow emulation also means silence, because the
 fewer samples than HDMI consumes. Both the compiled-in default ([pokeysnd.c](src/pokeysnd.c)) and
 [data/atari800.cfg](data/atari800.cfg) are 0 now; it remains selectable under F1 → Sound Settings. A card
 seeded earlier still carries its own `ENABLE_NEW_POKEY` line, and that wins.
+
+**Digitised sound needs `POKEYSND_SAMPBUF_MAX` to stay large.** The standard engine queues every
+volume-only write of a frame in a ring of that many entries ([pokeysnd.h](src/pokeysnd.h)); upstream has
+2000, the RP2040 port had cut it to 16, which keeps the last 16 writes of each frame and drops the rest —
+speech and samples as noise. It is 1024 now (16 KB across four arrays, two of them only used with stereo
+POKEY).
 
 **Moving the emulator's inner loop into RAM was tried and did not help.** `cpu.c`, `antic.c`, `gtia.c`,
 `pokey.c`, `pokeysnd.c` and `pia.c` (about 50 KB) were added to the exclude lists in

@@ -116,8 +116,12 @@ void POKEYSND_SetVolume(int vol);
 /* Volume only emulations declarations */
 #ifdef VOL_ONLY_SOUND
 
-#define	POKEYSND_SAMPBUF_MAX	16
-//#define	POKEYSND_SAMPBUF_MAX	2000
+/* Volume changes queued per frame for digitised (volume-only) sound. Upstream
+   uses 2000. The RP2040 port cut this to 16 to save RAM, which keeps the last
+   16 changes of a frame and throws the rest away - speech and samples came
+   out as noise. A player that writes once per scanline needs 262 a frame and
+   the fast ones a few times that; 1024 entries are 16 KB over four arrays. */
+#define	POKEYSND_SAMPBUF_MAX	1024
 extern int	POKEYSND_sampbuf_val[POKEYSND_SAMPBUF_MAX];	/* volume values */
 extern int	POKEYSND_sampbuf_cnt[POKEYSND_SAMPBUF_MAX];	/* relative start time */
 extern int	POKEYSND_sampbuf_ptr;                    /* pointer to sampbuf */
